@@ -4,7 +4,7 @@ Windows 桌面战术面板，汇总 War Thunder 本地 `127.0.0.1:8111` 接口�
 
 ## 下载与启动
 
-打开 [最新软件下载](https://github.com/Fish-Fy/WTmonitorTerminal/releases/latest)，下载 `WTMonitorTerminal-v1.0.4-Windows-x64.zip`。
+打开 [最新软件下载](https://github.com/Fish-Fy/WTmonitorTerminal/releases/latest)，下载 `WTMonitorTerminal-v1.0.5-Windows-x64.zip`。
 
 1. 将整个 ZIP 解压到可写文件夹，保留 `_internal` 和 `licenses` 文件夹。
 2. 双击 `WTMonitorTerminal.exe`，无需安装 Python。
@@ -18,6 +18,7 @@ Windows 桌面战术面板，汇总 War Thunder 本地 `127.0.0.1:8111` 接口�
 - 实时战术地图、轨迹、出生点和占领区显示。
 - 地图缓存、地图库管理、人工命名和重复底图整理。
 - 地图标点、连线和路线规划，支持离线编辑。
+- 标点方案可绑定同图的多个任务，也可复制分享码。导入时先选地图，再预览点位与路线。
 - 本局载具识别、敌友分组和击杀统计；本人并入「友方」，优先显示带战队前缀的名字。
 - 可选高亮本局击毁过自己的玩家，持续到本局结束。
 - 飞行仪表与两种姿态仪样式，包括飞机倾斜、地平线保持水平的样式。
