@@ -2,7 +2,7 @@
 
 Windows 桌面战术面板，汇总 War Thunder 本地 `127.0.0.1:8111` 接口提供的地图、击杀文案与飞行仪表数据，支持地图标点和手机浏览器显示。
 
-[English overview and quick start](#english)
+[Full English README](#english)
 
 ## 下载与启动
 
@@ -34,7 +34,7 @@ Windows 桌面战术面板，汇总 War Thunder 本地 `127.0.0.1:8111` 接口�
 
 程序只读取本地战术接口，不注入、不读取游戏内存、不修改游戏文件。可显示的信息取决于游戏接口实际提供的数据。
 
-下载包使用空白昵称与默认配置，内置 224 张地图的底图、缩略图及可用的公开任务布局。个人标点方案和对局记录均排除在下载包外。首次使用后，个人地图、方案和界面偏好保存在程序目录的 `data` 中，昵称保存在 `config.yaml` 中。
+下载包使用空白昵称与默认配置，内置 226 张地图的底图、缩略图及可用的公开任务布局。个人标点方案和对局记录均排除在下载包外。首次使用后，个人地图、方案和界面偏好保存在程序目录的 `data` 中，昵称保存在 `config.yaml` 中。
 
 手机显示需在程序中手动开启，并使用面板列出的局域网地址。
 
@@ -56,15 +56,54 @@ Windows 桌面战术面板，汇总 War Thunder 本地 `127.0.0.1:8111` 接口�
 
 ## English
 
-WTMonitorTerminal is a Windows x64 companion for War Thunder. It reads the game's local tactical interface at `127.0.0.1:8111` and displays the live map, spawn and capture points, the kill feed, and flight instruments.
+WTMonitorTerminal is a Windows desktop tactical panel for War Thunder. It brings together map data, kill notifications, and flight instrument readings from the game's local interface at `127.0.0.1:8111`. You can place markers on the map and view the panel in a phone browser.
 
-Use cached maps to plan routes and place markers offline. You can bind plans to missions and share them using a code. The optional phone view mirrors the map and battle roster in a browser on the same local network.
+### Download and launch
 
-### Quick start
+Download the latest Windows x64 ZIP. [Latest release](https://github.com/Fish-Fy/WTmonitorTerminal/releases/latest)
 
-1. Download the Windows x64 full ZIP. [Latest release](https://github.com/Fish-Fy/WTmonitorTerminal/releases/latest)
-2. Extract the entire ZIP to a writable folder and run `WTMonitorTerminal.exe`. Keep the `_internal` and `licenses` folders alongside it.
-3. Choose **面板设置 (Panel settings) → 界面语言 (Interface language) → English**, then reopen the terminal. Refresh the phone page if it is already open.
-4. Set your in-game nickname to enable friendly and enemy identification. Start War Thunder and enter a session that provides local tactical data.
+1. Extract the entire ZIP to a writable folder. Keep the `_internal` and `licenses` folders.
+2. Double-click `WTMonitorTerminal.exe`. The package runs without a separate Python installation.
+3. Select **Set nickname** at the top right and enter your in-game nickname. You can change it later with **Edit nickname**.
+4. While War Thunder is running, the terminal automatically reads any data available through the local interface on port 8111. You can use cached maps for planning when live data is unavailable.
 
-English is available from v1.1.1. You can search public maps by their English or Chinese names, and the kill feed automatically recognizes supported combat messages in either language.
+WTMonitorTerminal supports Windows x64. Use the software ZIP attached to the release. GitHub's automatically generated **Source code (zip/tar.gz)** archives contain this download repository's documentation.
+
+### Main features
+
+- Live tactical map with movement trails, spawn points, and capture zones.
+- Map caching and library management, including manual map naming and duplicate map cleanup.
+- Map markers, links, and route planning, with offline editing.
+- Bind a marker plan to multiple missions on the same map, or copy a share code. When importing, select the map first, then preview the markers and routes.
+- In-match vehicle identification, friendly and enemy grouping, and kill counts. Your own entry appears under **Friendly**, and displayed names with squadron tags take priority.
+- Optional highlighting for players who destroyed you. The highlight lasts until the end of the match.
+- Flight instruments and two attitude indicator styles, including one in which the aircraft tilts while the horizon stays level.
+- A read-only map and roster view in a phone browser on the same local network. This feature is off by default.
+
+### Interface language
+
+Starting with v1.1.1, the desktop terminal and phone view support Simplified Chinese and English. Open **Panel settings → Interface language** (**面板设置 → 界面语言** in Chinese), select **English**, and restart the terminal. You can search the map library for public maps by their Chinese or English names. The kill feed automatically recognizes supported combat messages in both languages.
+
+### Data and usage
+
+The terminal runs externally and reads game data only through the local tactical interface. It does not inject code into the game, read game memory, or modify game files. The information it can display depends on what the game exposes through that interface.
+
+The download ships with a blank nickname and default settings. It includes 226 map images and thumbnails, plus available public mission layouts. Personal marker plans and match records are excluded from the package. After first use, the terminal stores personal maps, plans, and interface preferences in the program folder's `data` directory. It stores your nickname in `config.yaml`.
+
+To use the phone view, enable it in the terminal and open the local network address shown in the panel.
+
+### Frequently asked questions
+
+**Why is there no live data after I open the terminal?**
+
+Make sure War Thunder is running and the local interface on port 8111 is reachable. Then enter a game session that provides live data. Set your in-game nickname to enable friendly and enemy identification.
+
+**Why does Windows show an unknown publisher warning?**
+
+The current version uses no trusted code-signing certificate, so Windows may show a prompt during download or on first launch. Compare the ZIP's SHA-256 hash with the checksum file attached to the release to confirm that the files match. A matching checksum verifies the file's integrity. Code-signing trust is separate.
+
+**What should I include in a bug report?**
+
+Include your software version, steps to reproduce the issue, the expected result, and screenshots. Before sharing settings or screenshots, check for your in-game nickname, local network addresses, and any other personal information.
+
+Keep the `licenses` directory, which contains the licenses for the third-party components shipped with the program.
