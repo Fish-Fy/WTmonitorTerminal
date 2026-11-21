@@ -2,6 +2,8 @@
 
 Windows 桌面战术面板，汇总 War Thunder 本地 `127.0.0.1:8111` 接口提供的地图、击杀文案与飞行仪表数据，支持地图标点和手机浏览器显示。
 
+[English overview and quick start](#english)
+
 ## 下载与启动
 
 打开 [最新软件下载](https://github.com/Fish-Fy/WTmonitorTerminal/releases/latest)，下载最新版的 Windows x64 ZIP。
@@ -23,6 +25,10 @@ Windows 桌面战术面板，汇总 War Thunder 本地 `127.0.0.1:8111` 接口�
 - 可选高亮本局击毁过自己的玩家，持续到本局结束。
 - 飞行仪表与两种姿态仪样式，包括飞机倾斜、地平线保持水平的样式。
 - 手机浏览器只读显示地图和列表，同一局域网内使用，默认关闭。
+
+## 界面语言
+
+从 v1.1.1 起，桌面终端和手机页面支持简体中文与英语。打开「面板设置 → 界面语言」，选择 `English` 后重启终端。地图库支持用中英文搜索公开地图，击杀流会自动识别受支持的中英文战斗消息。
 
 ## 数据与使用范围
 
@@ -47,3 +53,18 @@ Windows 桌面战术面板，汇总 War Thunder 本地 `127.0.0.1:8111` 接口�
 请提供软件版本、复现步骤、预期结果和截图。分享配置或截图前，先检查是否包含自己的昵称、局域网地址或其他个人信息。
 
 随包第三方组件许可保存在 `licenses` 目录，请保留该目录。
+
+## English
+
+WTMonitorTerminal is a Windows x64 companion for War Thunder. It reads the game's local tactical interface at `127.0.0.1:8111` and displays the live map, spawn and capture points, the kill feed, and flight instruments.
+
+Use cached maps to plan routes and place markers offline. You can bind plans to missions and share them using a code. The optional phone view mirrors the map and battle roster in a browser on the same local network.
+
+### Quick start
+
+1. Download the Windows x64 full ZIP. [Latest release](https://github.com/Fish-Fy/WTmonitorTerminal/releases/latest)
+2. Extract the entire ZIP to a writable folder and run `WTMonitorTerminal.exe`. Keep the `_internal` and `licenses` folders alongside it.
+3. Choose **面板设置 (Panel settings) → 界面语言 (Interface language) → English**, then reopen the terminal. Refresh the phone page if it is already open.
+4. Set your in-game nickname to enable friendly and enemy identification. Start War Thunder and enter a session that provides local tactical data.
+
+English is available from v1.1.1. You can search public maps by their English or Chinese names, and the kill feed automatically recognizes supported combat messages in either language.
