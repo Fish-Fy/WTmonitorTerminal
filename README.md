@@ -54,6 +54,10 @@ Windows 桌面战术面板，汇总 War Thunder 本地 `127.0.0.1:8111` 接口�
 
 随包第三方组件许可保存在 `licenses` 目录，请保留该目录。
 
+## 致谢
+
+WTMonitorTerminal 由 Fish-Fy 开发和维护。感谢 [OpenAI Codex](https://github.com/codex) 协助功能实现、问题排查和测试。
+
 ## English
 
 WTMonitorTerminal is a Windows desktop tactical panel for War Thunder. It brings together map data, kill notifications, and flight instrument readings from the game's local interface at `127.0.0.1:8111`. You can place markers on the map and view the panel in a phone browser.
@@ -107,3 +111,7 @@ The current version uses no trusted code-signing certificate, so Windows may sho
 Include your software version, steps to reproduce the issue, the expected result, and screenshots. Before sharing settings or screenshots, check for your in-game nickname, local network addresses, and any other personal information.
 
 Keep the `licenses` directory, which contains the licenses for the third-party components shipped with the program.
+
+### Acknowledgments
+
+WTMonitorTerminal is developed and maintained by Fish-Fy, with help from [OpenAI Codex](https://github.com/codex) on feature implementation, debugging, and testing.
