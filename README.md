@@ -38,6 +38,10 @@ Windows 桌面战术面板，汇总 War Thunder 本地 `127.0.0.1:8111` 接口�
 
 手机显示需在程序中手动开启，并使用面板列出的局域网地址。
 
+## 源码许可
+
+WTMonitorTerminal 的自有源码采用 [PolyForm Noncommercial License 1.0.0](LICENSE)。可按协议为非商业目的使用、修改和再分发。商业使用需另行获得授权。第三方组件和游戏素材适用各自的许可或权利声明。
+
 ## 常见问题
 
 **打开后没有实时数据？**
@@ -95,6 +99,10 @@ The terminal runs externally and reads game data only through the local tactical
 The download ships with a blank nickname and default settings. It includes 226 map images and thumbnails, plus available public mission layouts. Personal marker plans and match records are excluded from the package. After first use, the terminal stores personal maps, plans, and interface preferences in the program folder's `data` directory. It stores your nickname in `config.yaml`.
 
 To use the phone view, enable it in the terminal and open the local network address shown in the panel.
+
+### Source code license
+
+The original WTMonitorTerminal source code is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE) for noncommercial use, modification, and redistribution under its terms. Commercial use requires separate permission. Third-party components and game assets are subject to their respective licenses or rights notices.
 
 ### Frequently asked questions
 
