@@ -1,0 +1,25 @@
+# Local configuration and runtime data
+/config.yaml
+/.config-*.tmp
+/data/
+/.venv/
+/.tmp/
+/.mnemon/
+/.vscode/
+/.idea/
+__pycache__/
+*.py[cod]
+*.log
+*.lnk
+.env
+.env.*
+*.cer
+*.crt
+*.key
+*.pfx
+*.p12
+*.pem
+/build/
+/dist/
+/release/
+/output/

@@ -1,0 +1,47 @@
+# 默认配置。需要自定义时复制为 config.yaml。
+host: 127.0.0.1
+port: 8111
+config_blk_path: ''
+poll:
+  state: 5
+  map_img: 2
+  mission: 1
+  mission_idle: 0.2
+  indicators: 8
+session:
+  state_timeout: 5.0
+replay:
+  enabled: false
+identity:
+  my_nick: ''
+alerts:
+  enabled: true
+  low_fuel_kg: 1500.0
+  stall_aoa_deg: 18.0
+  aoa_hysteresis: 2.0
+  sound_file: ''
+  nearby_radius: 0.1
+  nearby_count: 2
+  nearby_window: 8.0
+  rampage_gap: 20.0
+  rampage_count: 3
+attitude:
+  invert_pitch: true
+  invert_roll: true
+  size: 148
+  smooth_tau: 0.08
+  stale_after: 1.5
+  show:
+  - attitude
+  auto_by_vehicle: true
+combat_overlay:
+  enabled: true
+  x: -1
+  y: -1
+  ttl: 8.0
+  max_rows: 6
+web:
+  enabled: false
+  host: 0.0.0.0
+  port: 8321
+data_dir: data

@@ -1,0 +1,29 @@
+# PyInstaller 版本资源: 决定 exe 文件属性里显示的"文件说明/公司/版本/版权"。
+# 这是**版本信息**, 不是数字签名 —— 真正的"受信任发布者"需要付费代码签名证书(见 README)。
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 0, 0, 0),
+    prodvers=(1, 0, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '080404B0',
+        [StringStruct('CompanyName', 'WTMonitorTerminal'),
+         StringStruct('FileDescription', 'War Thunder 战术小地图终端'),
+         StringStruct('FileVersion', '1.0.0.0'),
+         StringStruct('InternalName', 'WTMonitorTerminal'),
+         StringStruct('LegalCopyright', 'PolyForm Noncommercial License 1.0.0'),
+         StringStruct('OriginalFilename', 'WTMonitorTerminal.exe'),
+         StringStruct('ProductName', 'WTMonitorTerminal 战术终端'),
+         StringStruct('ProductVersion', '1.0.0.0')])
+    ]),
+    VarFileInfo([VarStruct('Translation', [2052, 1200])])
+  ]
+)

@@ -13,7 +13,7 @@ Windows 桌面战术面板，汇总 War Thunder 本地 `127.0.0.1:8111` 接口�
 3. 点击右上方「设置昵称」，填写自己的游戏昵称；之后可随时「修改昵称」。
 4. 游戏运行且本地 8111 接口有数据时，程序自动读取。没有实时数据时可使用已缓存地图进行规划。
 
-适用于 Windows x64。请下载上述软件 ZIP；GitHub 自动生成的 **Source code (zip/tar.gz)** 只包含本下载仓库的说明文件。
+适用于 Windows x64。直接使用请下载 Release 附件中的 Windows x64 软件 ZIP。当前源码可从仓库主页克隆或下载。
 
 ## 主要功能
 
@@ -37,6 +37,20 @@ Windows 桌面战术面板，汇总 War Thunder 本地 `127.0.0.1:8111` 接口�
 下载包使用空白昵称与默认配置，内置 226 张地图的底图、缩略图及可用的公开任务布局。个人标点方案和对局记录均排除在下载包外。首次使用后，个人地图、方案和界面偏好保存在程序目录的 `data` 中，昵称保存在 `config.yaml` 中。
 
 手机显示需在程序中手动开启，并使用面板列出的局域网地址。
+
+## 从源码运行
+
+在 Windows PowerShell 中进入仓库目录，使用 Python 3.12 或更新版本。
+
+~~~powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py
+~~~
+
+默认配置见 [config.example.yaml](config.example.yaml)。需要自定义时，将它复制为 config.yaml。昵称也可在程序内设置。程序运行后会将本地数据保存在 data 目录，实时地图来自游戏本地 8111 接口。预缓存地图库随 Windows 发布包提供。
+
+如需构建 Windows 可执行文件，先在虚拟环境安装 PyInstaller，再运行打包.bat。
 
 ## 源码许可
 
@@ -75,7 +89,7 @@ Download the latest Windows x64 ZIP. [Latest release](https://github.com/Fish-Fy
 3. Select **Set nickname** at the top right and enter your in-game nickname. You can change it later with **Edit nickname**.
 4. While War Thunder is running, the terminal automatically reads any data available through the local interface on port 8111. You can use cached maps for planning when live data is unavailable.
 
-WTMonitorTerminal supports Windows x64. Use the software ZIP attached to the release. GitHub's automatically generated **Source code (zip/tar.gz)** archives contain this download repository's documentation.
+WTMonitorTerminal supports Windows x64. Use the Windows x64 ZIP attached to the release to run the packaged application. Clone or download the current source from the repository home page.
 
 ### Main features
 
@@ -99,6 +113,20 @@ The terminal runs externally and reads game data only through the local tactical
 The download ships with a blank nickname and default settings. It includes 226 map images and thumbnails, plus available public mission layouts. Personal marker plans and match records are excluded from the package. After first use, the terminal stores personal maps, plans, and interface preferences in the program folder's `data` directory. It stores your nickname in `config.yaml`.
 
 To use the phone view, enable it in the terminal and open the local network address shown in the panel.
+
+### Run from source
+
+Open PowerShell in the repository directory and use Python 3.12 or later.
+
+~~~powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py
+~~~
+
+See [config.example.yaml](config.example.yaml) for defaults. Copy it to config.yaml to customize settings, or set your nickname in the app. The app stores local data under data and reads live maps from the game's local interface on port 8111. The pre-cached map library ships with the Windows release.
+
+To build the Windows executable, install PyInstaller in the virtual environment and run 打包.bat.
 
 ### Source code license
 

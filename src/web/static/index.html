@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="<!--LANG-->">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1419">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="{{appName}}">
+  <title>{{pageTitle}}</title>
+  <!--THEME-->
+  <link rel="stylesheet" href="/static/style.css">
+  <script id="mirror-copy" type="application/json"><!--COPY--></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+ <div id="app">
+  <header class="topbar">
+    <div class="header-title"><h1 id="scene">{{map}}</h1><span id="mode" hidden>{{planning}}</span></div>
+    <div class="top-actions">
+      <span id="connection" class="badge" role="status">{{connecting}}</span>
+      <details id="map-tools" class="map-tools">
+        <summary aria-label="{{mapTools}}" title="{{mapTools}}">⋯</summary>
+        <div class="map-controls" role="group" aria-label="{{mapControls}}">
+          <button id="zoom-out" aria-label="{{zoomOut}}">−</button>
+          <button id="zoom-in" aria-label="{{zoomIn}}">＋</button>
+          <button id="reset">{{reset}}</button>
+          <button id="focus">{{focus}}</button>
+        </div>
+      </details>
+      <button id="fullscreen" aria-pressed="false">{{fullscreen}}</button>
+    </div>
+  </header>
+  <main>
+    <section class="map-panel" aria-label="{{liveMap}}">
+      <div id="stage" class="map-stage">
+        <img id="map" alt="{{mapAlt}}" draggable="false" hidden>
+        <div id="empty" class="empty"><span class="crosshair">＋</span><strong>{{waitingMap}}</strong><p>{{waitingHint}}</p></div>
+        <span class="live-mark"><i></i> <span id="frame-status">{{waitingFrame}}</span></span>
+      </div>
+      <p id="threat" class="threat" role="alert" hidden></p>
+    </section>
+    <aside class="roster-panel">
+      <div class="section-title"><h2>{{roster}}</h2><span id="count">{{emptyCount}}</span></div>
+      <input id="search" type="search" placeholder="{{search}}…" aria-label="{{search}}">
+      <div class="roster-options">
+        <label><input id="hide-left" type="checkbox">{{hideLeft}}</label>
+        <label><input id="highlight-killers" type="checkbox">{{highlight}}</label>
+      </div>
+      <div class="roster-columns" aria-hidden="true"><span>{{nickname}}</span><span>{{vehicle}}</span><span>{{kills}}</span><span>{{status}}</span></div>
+      <div id="roster"></div>
+    </aside>
+  </main>
+  <p id="fullscreen-notice" class="toast" role="status" hidden></p>
+ </div>
+</body>
+</html>
