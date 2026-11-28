@@ -42,7 +42,7 @@ class Calibration:
             sx, sy = self.info.grid_size
         else:
             x0 = self.info.map_min[0]
-            y0 = self.info.map_max[1] if self.flip_y else self.info.map_min[1]
+            y0 = self.info.map_min[1]
             sx = self.info.map_max[0] - self.info.map_min[0]
             sy = self.info.map_max[1] - self.info.map_min[1]
         if sx <= 0 or sy <= 0:
@@ -62,7 +62,7 @@ class Calibration:
             sx, sy = self.info.grid_size
         else:
             x0 = self.info.map_min[0]
-            y0 = self.info.map_max[1] if self.flip_y else self.info.map_min[1]
+            y0 = self.info.map_min[1]
             sx = self.info.map_max[0] - self.info.map_min[0]
             sy = self.info.map_max[1] - self.info.map_min[1]
         if sx <= 0 or sy <= 0:

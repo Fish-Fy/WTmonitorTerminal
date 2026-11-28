@@ -15,6 +15,7 @@ import shutil
 import struct
 import subprocess
 import sys
+from threading import Event
 import types
 import zipfile
 
@@ -176,27 +177,67 @@ def audit(payload, work, tokens, map_files=()):
             "private_findings": 0, "personal_data_included": False}
 
 
-def archive_payload(payload, output, work, *, program_only=False):
-    temporary_zip = work / output.name
+def program_files(root):
+    return {file.relative_to(root).as_posix(): file for file in sorted(root.rglob("*"))
+            if file.is_file() and file.relative_to(root).parts[0] in updater.UNITS}
+
+
+def file_sha256(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def save_archive(temporary_zip, output):
+    sha = file_sha256(temporary_zip)
+    with temporary_zip.open("rb") as packed, output.open("xb") as dest:
+        shutil.copyfileobj(packed, dest)
+    output.with_suffix(".sha256").write_text(f"{sha}  {output.name}\n", encoding="ascii")
+    return {"archive": output.name, "bytes": output.stat().st_size, "sha256": sha}
+
+
+def archive_payload(payload, temporary_zip, *, program_only=False):
     with zipfile.ZipFile(temporary_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for file in sorted(payload.rglob("*")):
             relative = file.relative_to(payload)
             if file.is_file() and (not program_only or relative.parts[0] in updater.UNITS):
                 archive.write(file, Path("WTMonitorTerminal") / relative)
     if program_only:
-        from threading import Event
-        updater.extract_update(temporary_zip, work / "validate-update", updater.read_version(payload / "_internal"),
-                               Event())
+        updater.extract_update(temporary_zip, temporary_zip.parent / "validate-update",
+                               updater.read_version(payload / "_internal"), Event())
     else:
         with zipfile.ZipFile(temporary_zip) as archive:
             if archive.testzip() is not None:
                 raise RuntimeError("公开版 ZIP 校验失败")
-    with temporary_zip.open("rb") as packed:
-        sha = hashlib.file_digest(packed, "sha256").hexdigest()
-    with temporary_zip.open("rb") as packed, output.open("xb") as dest:
-        shutil.copyfileobj(packed, dest)
-    output.with_suffix(".sha256").write_text(f"{sha}  {output.name}\n", encoding="ascii")
-    return {"archive": output.name, "bytes": output.stat().st_size, "sha256": sha}
+
+
+def build_light_archive(payload, base_package, base_tag, target_tag, temporary_zip, app_resources):
+    if base_package.with_suffix(".sha256").read_text(encoding="ascii").split() != [
+            file_sha256(base_package), base_package.name]:
+        raise ValueError(f"运行库基准包的 SHA-256 校验失败：{base_package.name}")
+    work = temporary_zip.parent
+    baseline = work / "light-baseline"
+    updater.extract_update(base_package, baseline, base_tag, Event())
+    previous = program_files(baseline)
+    files = program_files(payload)
+    reuse = {}
+    target = {name: (path.stat().st_size, file_sha256(path)) for name, path in files.items()}
+    with zipfile.ZipFile(temporary_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        for name, source in files.items():
+            earlier = previous.get(name)
+            size, digest = target[name]
+            if (name.split("/", 1)[0] in {"_internal", "licenses"} and name not in app_resources and earlier is not None
+                    and earlier.stat().st_size == size and file_sha256(earlier) == digest):
+                reuse[name] = (size, digest)
+            else:
+                archive.write(source, f"WTMonitorTerminal/{name}")
+        if not reuse:
+            raise ValueError("目标版本没有可以复用的程序文件")
+        archive.writestr(updater.LIGHT_MANIFEST, json.dumps({"format": 1, "reuse": reuse}, ensure_ascii=False))
+    rebuilt = work / "validate-light"
+    updater.extract_update(temporary_zip, rebuilt, target_tag, Event(), installed=baseline)
+    if {name: (path.stat().st_size, file_sha256(path)) for name, path in program_files(rebuilt).items()} != target:
+        raise RuntimeError("轻量更新重建后的程序文件与完整更新不一致")
+    return {"baseline": base_tag, "reused_files": len(reuse), "bundled_files": len(files) - len(reuse)}
 
 
 def main():
@@ -205,6 +246,7 @@ def main():
     parser.add_argument("--version", help="发布版本号，例如 v1.0.0；省略时使用日期版本")
     parser.add_argument("--include-maps", action="store_true", help="附带现存底图、缩略图及公开任务资料")
     parser.add_argument("--source-smoke", action="store_true", help="在隔离的公开版源码副本中自检，避免启动临时 EXE")
+    parser.add_argument("--light-base", help="从指定已发布版本的程序更新包生成轻量包，例如 v1.1.5")
     args = parser.parse_args()
     if args.version and not re.fullmatch(r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", args.version):
         parser.error("版本号格式应为 v1.0.0 或 1.0.0")
@@ -219,7 +261,14 @@ def main():
     basename = f"WTMonitorTerminal-{'v' + release_version if release_version else tag}-Windows-x64"
     output = release / f"{basename}.zip"
     update_output = release / updater.asset_name("v" + release_version) if release_version else None
-    for file in (output, update_output):
+    target_tag = f"v{release_version}" if release_version else None
+    light_output = None
+    if args.light_base:
+        base = updater.version_key(args.light_base)
+        if not target_tag or not base or base >= updater.version_key(target_tag):
+            parser.error("--light-base 必须是早于 --version 的正式版本")
+        light_output = release / updater.asset_name(target_tag, light=True)
+    for file in (output, update_output, light_output):
         if file and (file.exists() or file.with_suffix(".sha256").exists()):
             raise FileExistsError(f"不覆盖已有发布包或校验文件: {file.name}")
     work = ROOT / ".tmp" / ("share-build-" + tag + "-" + datetime.now().strftime("%H%M%S-%f"))
@@ -286,7 +335,7 @@ coll=COLLECT(exe,a.binaries,a.datas,strip=False,upx=False,name='WTMonitorTermina
     shutil.copyfile(stage / "config.yaml", payload / "config.yaml")
     map_files = bundle_maps(payload) if args.include_maps else set()
     map_count = sum(path.name == "base.png" for path in map_files)
-    includes_sun_city_update = release_version in {"1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5"}
+    includes_sun_city_update = release_version in {"1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6"}
     if includes_sun_city_update:
         from src.agent.bundled_maps import SCENE, SUN_CITY_SHA256, SUN_CITY_UPDATE
 
@@ -302,6 +351,7 @@ coll=COLLECT(exe,a.binaries,a.datas,strip=False,upx=False,name='WTMonitorTermina
     update_note = f"""软件更新
 右侧昵称旁的“检查更新”会查找新版，程序启动后也会在后台检查一次。下载会同时使用 GitHub、GitHub 下载加速站和 Gitee，采用最先通过校验的更新包。下载就绪后点击“安装新版”并重启。
 下载前显示新版改动，在线安装完成后再次提示并保存日志。右键点击“检查更新”即可回看。
+新版有轻量包时优先尝试下载，并用校验通过的本机文件重建完整程序。如果轻量包下载或校验失败，会自动下载完整程序更新包。
 在线更新保留 config.yaml、个人方案和地图库。{sun_city_note}完整地图库随完整包提供。
 若从没有“检查更新”的旧版手动迁移：关闭两个版本，把新版完整包解压到新目录，然后将旧版的 data 和 config.yaml 复制到新目录。覆盖同名项目时选用旧版文件，先保留旧文件夹，确认新版读到方案后再整理。
 如果修改过 config.yaml 中的 data_dir，请保留该设置，并一起迁移实际数据目录。
@@ -320,7 +370,7 @@ coll=COLLECT(exe,a.binaries,a.datas,strip=False,upx=False,name='WTMonitorTermina
 先新建标点方案；地图右键添加标点，Shift+左键快速加点，选中节点后 Shift+点击另一节点连线。
 在“标点方案”中可绑定多个任务，也可复制分享码。导入时选地图、粘贴分享码、预览标点、路线和区域，再保存为新方案。
 “绘制区域”可从圆心拖拽画圆，或依次点击三个圆周点画圆。多边形按 Enter 保存；三点画圆和多边形均可用 Backspace 撤回上一个点，Esc 取消。
-右键已有标点，选择“从此点续画路线”可连续添加路线点并连线，按 Esc 结束。连接路线点时显示双尖括号，狙击点指向交战点时显示进攻箭头。
+右键已有标点可点选目标点连线。连接路线点时显示双尖括号，狙击点指向交战点时显示进攻箭头。
 复制分享码可选汉字短码（WT5）或字母数字码。含图外圆心、大圆时字母数字码使用 WT4。接收方需使用支持对应格式的版本，新版也可读取 WT1、WT2、WT3。
 地图会自动缓存，同底图自动合并，人工命名优先。没有实时对象时会明确显示缓存提示。
 载具状态显示中可切换姿态仪样式；本局载具识别中可开启“高亮击毁过我的玩家”，标记持续到本局结束。
@@ -378,10 +428,33 @@ coll=COLLECT(exe,a.binaries,a.datas,strip=False,upx=False,name='WTMonitorTermina
     smoke["execution"] = "staged_source" if args.source_smoke else "packaged_exe"
     # 确认待发副本没有在验证过程中创建任何个人数据。
     privacy = audit(payload, work, tokens, map_files)
-    report = {**archive_payload(payload, output, work), "version": version,
+    if light_output:
+        light_zip = work / light_output.name
+        app_resources = set()
+        for source, directory in package_data:
+            path = stage / source
+            target = Path("_internal") / directory
+            if path.is_dir():
+                app_resources.update((target / file.relative_to(path)).as_posix()
+                                     for file in path.rglob("*") if file.is_file())
+            else:
+                app_resources.add((target / path.name).as_posix())
+        app_resources.update(name for name in program_files(payload) if name.startswith("_internal/map-updates/"))
+        light_details = build_light_archive(payload, release / updater.asset_name(args.light_base),
+                                            args.light_base, target_tag, light_zip, app_resources)
+    full_zip = work / output.name
+    archive_payload(payload, full_zip)
+    if update_output:
+        update_zip = work / update_output.name
+        archive_payload(payload, update_zip, program_only=True)
+    if light_output and light_zip.stat().st_size >= update_zip.stat().st_size:
+        raise RuntimeError("轻量更新包体积未小于完整程序更新包")
+    report = {**save_archive(full_zip, output), "version": version,
               "privacy": privacy, "smoke_test": smoke, "bundled_maps": map_count}
     if update_output:
-        report["program_update"] = archive_payload(payload, update_output, work, program_only=True)
+        report["program_update"] = save_archive(update_zip, update_output)
+    if light_output:
+        report["light_update"] = {**save_archive(light_zip, light_output), **light_details}
     (release / f"{basename}-validation.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
 

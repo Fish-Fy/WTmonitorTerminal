@@ -18,6 +18,7 @@ OK = "#35d0ba"        # 安全(青绿): 能连上/正常/hint 绿
 DANGER = "#ff5c5c"    # 危险: 我挨打/断开
 FRIEND = "#4da3ff"    # 我动手/友方强调
 MONO = "'Cascadia Mono','JetBrains Mono','Consolas',monospace"
+ROSTER_STATUS_COLORS = {"alive": OK, "killed": ACCENT, "left": "#a89abb", "unknown": DIM}
 
 # 兼容历史命名的语义别名(收编旧内联样式时对照用)
 HINT_WARN = ACCENT    # 旧 #af5200 hint 橙
@@ -34,7 +35,7 @@ def tokens() -> dict[str, str]:
 
 def css_variables() -> str:
     """:root{...} 形式的 CSS 变量块, 由 Web 服务端注入页面 <head>。"""
-    t = tokens()
+    t = {**tokens(), **{f"roster-{status}": color for status, color in ROSTER_STATUS_COLORS.items()}}
     pairs = "; ".join(f"--{k}: {v}" for k, v in t.items())
     return f":root {{ {pairs}; }}"
 
@@ -123,6 +124,7 @@ QTabBar#workspaceTabs::tab {{
 }}
 QTabBar#workspaceTabs::tab:selected {{ border-color: {ACCENT}; color: {ACCENT}; }}
 QTabBar#workspaceTabs::tab:hover {{ color: {TEXT}; }}
+QLabel[workspaceCount="true"] {{ background: transparent; color: {DIM}; font-size: 11px; }}
 QWidget#sidebarContext {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 6px; }}
 QWidget#sidebarContext QLabel {{ background: transparent; border: none; }}
 QLabel#mapTitle, QLabel[pageTitle="true"] {{ font-size: 15px; font-weight: bold; }}

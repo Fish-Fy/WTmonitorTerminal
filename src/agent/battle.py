@@ -1,27 +1,12 @@
-"""对局边界判定 —— 载具识别池"每一局清一次"靠什么触发。
+"""合并任务结算、本人退出、地图有效性和 HUD 时钟，划分对局。
 
-真机取证后的结论（L 轮，两次现场采样各 30~40s）：
-  * 正常打一局期间 `map_info.valid`、几何签名、`map_generation`、hud `time` **全都稳定**
-    ⇒ 用户报的"莫名其妙被清空"不是这些抖动来的；
-  * 陆战里 **出击载具在坦克↔飞机之间切换会换两张不同几何的图** ⇒ 伪场景名来回变。
-    以前把"场景名变化"当边界 ⇒ 同一局内每换一次出击载具就清一次池子。**现在不再当边界。**
-
-所以边界只认"真的开了一局/真的回过大厅"这类硬信号，并且一律带**去抖**：
-  1. 任务时钟回落（`/hudmsg` 的 `time` 是局内秒，新局从头开始）—— 最强信号。
-  2. 「先拔头筹」重复出现（一局只该有一次）或时间戳倒退。
-  3. `map_info.valid` **持续** false ≥ `valid_grace` 秒 = 真的离开战场回大厅（瞬时抖动被吃掉）。
-  4. 离线 **持续** ≥ `offline_grace` 秒后重连 = 客户端可能重启（探活抖动不算）。
-  「最后一击/最终赢家/完成了一击」只置标记，**绝不单独清空** —— 必须等上面某个真信号确认。
-
-刻意不用：`map_generation`（实测重生也 +1）、`mission.status`（实测恒 "running"）、
-伪场景名变化（陆战出击换载具就会变，见上）。
-另两条真机坑：首包常把上一局的尾巴混在本批前几条 ⇒ `scan` 返回**批内切点**只吸收其后的事件；
-新一局的第一条常常就是本批第 0 条 ⇒ 切点不能兼任"有没有边界"，所以返回二元组。
-策略：宁可漏清一次，也不要误清；每次清空都把原因写进 `last_reason`（主窗口会记进 clear_log）。
+HUD 缓冲可跨局，结算后先暂停接收，重新入场时只交付新局的消息。
+场景几何和地图版本会在同局换载具时变化，单独的变化无法判定对局。
 """
 from __future__ import annotations
 
 import time
+from math import isfinite
 from typing import Any, Callable, Iterable
 
 from ..i18n import tr
@@ -29,8 +14,10 @@ from ..i18n import tr
 DEFAULT_MARGIN = 5.0          # 秒; 小于这个回落量视为抖动/乱序
 DEFAULT_VALID_GRACE = 2.0     # 秒; valid 持续 false 这么久才算真离开战场
 DEFAULT_OFFLINE_GRACE = 3.0   # 秒; 离线持续这么久后重连才算边界
-LAST_KILL = "last_kill"       # 「最后一击 / 最终赢家 / 完成了一击」
-FIRST_BLOOD = "first_blood"   # 「先拔头筹」
+LAST_KILL = "last_kill"
+FIRST_BLOOD = "first_blood"
+SELF_QUIT = "self_quit"
+FINISHED_MISSION_STATUSES = frozenset(("success", "fail", "failed"))
 
 
 class BattleWatcher:
@@ -48,50 +35,75 @@ class BattleWatcher:
         self._online = False
         self._ever_online = False
         self._offline_since: float | None = None
-        self._in_battle: bool | None = None
+        self._map_valid: bool | None = None
         self._invalid_since: float | None = None
-        self._left_battle = False               # 已经为"离开战场"清过一次
-        self._pending_end = False               # 收到"最后一击", 等真信号确认
-        self._last_fb: float | None = None      # 上一次"先拔头筹"的时间戳
+        self._left_battle = False
+        self._mission_finished = False
+        self.hud_closed = False
+        self._closed_at: float | None = None
 
-    # ------------------------------------------------------------------ 内部
-    def _boundary(self, reason: str) -> None:
+    def _record_boundary(self, reason: str) -> None:
         self.last_reason = reason
         self.battle_id += 1
+
+    def _close_hud(self) -> None:
+        self.hud_closed = True
+        self._closed_at = self._max_t
         self._max_t = None
-        self._pending_end = False
-        self._last_fb = None
 
-    # ------------------------------------------------------------------ 输入
-    def scan(self, times: Iterable[Any]) -> tuple[int, bool]:
-        """扫一遍本批 `time`，返回 `(cut, 是否出现新一局)`。
+    def _finish(self, reason: str) -> bool:
+        if self.hud_closed:
+            return False
+        self._close_hud()
+        self._record_boundary(reason)
+        return True
 
-        `cut` = 从第几条起属于当前这局（新一局的第一条常常就是本批第 0 条，所以切点不能
-        兼任边界信号）；一批内多次回落以最后一次为准，且 `battle_id` 每批最多 +1。
+    def scan_hud(self, rows: Iterable[tuple[Any, str]]) -> tuple[int, bool]:
+        """按 HUD 消息 ID 顺序处理时间和线索，返回应保留的后缀起点及是否清理。
+
+        一批可混有旧局战报、结算和新局战报，只交付最后一段仍有效的战报。
         """
-        vals = list(times or ())
         cut = 0
-        hit = False
-        for idx, raw in enumerate(vals):
+        reason = ""
+        for idx, (raw, signal) in enumerate(rows):
+            ending = signal in (LAST_KILL, SELF_QUIT)
             try:
-                t = float(raw)                  # type: ignore[arg-type]
+                t = float(raw)
             except (TypeError, ValueError):
-                continue
-            if t <= 0:
-                continue                        # 没有可用 time => 不参与判定
-            if self._max_t is None:
-                self._max_t = t
-                continue
-            if t + self.margin < self._max_t:
-                prev = self._max_t
-                self._max_t = t                 # 以新局为基线继续观察
+                t = 0.0
+            timed = isfinite(t) and t > 0
+            if self.hud_closed:
+                restarted = (timed and self._closed_at is not None
+                             and t + self.margin < self._closed_at)
+                if self._map_valid is False or not (restarted or signal == FIRST_BLOOD):
+                    if timed and (self._closed_at is None or t > self._closed_at):
+                        self._closed_at = t
+                    cut = idx + 1
+                    continue
+                self.hud_closed = False
                 cut = idx
-                if not hit:
-                    hit = True
-                    self._boundary(tr("任务时钟回落 {0:.0f}s→{1:.0f}s", prev, t))
-            elif t > self._max_t:
+            elif (self._closed_at is not None and signal != FIRST_BLOOD
+                  and (not timed or t == self._closed_at or ending)):
+                # 重新入场时，缓冲里仍可能有同一结算秒的嘉奖和伤害。
+                cut = idx + 1
+                continue
+            self._closed_at = None
+            if timed and self._max_t is not None and t + self.margin < self._max_t:
+                reason = reason or tr("任务时钟回落 {0:.0f}s→{1:.0f}s", self._max_t, t)
+                self._max_t = None
+                cut = idx
+            if timed and (self._max_t is None or t > self._max_t):
                 self._max_t = t
-        return cut, hit
+            if ending:
+                reason = tr("收到对局收尾嘉奖") if signal == LAST_KILL else tr("本人退出了战斗")
+                self._close_hud()
+                cut = idx + 1
+        if reason:
+            self._record_boundary(reason)
+        return cut, bool(reason)
+
+    def scan(self, times: Iterable[Any]) -> tuple[int, bool]:
+        return self.scan_hud((t, "") for t in times or ())
 
     def feed_times(self, times: Iterable[Any]) -> bool:
         return self.scan(times)[1]
@@ -99,22 +111,15 @@ class BattleWatcher:
     def feed_events(self, events: Iterable[Any]) -> bool:
         return self.feed_times(getattr(e, "time", None) for e in events or ())
 
-    def on_award(self, kind: str, t: float = 0.0) -> bool:
-        """嘉奖类信号。`last_kill` 只置标记；`first_blood` 只在"本局已经有过一次"或时间戳
-        倒退时才判为新一局 —— 单独一句嘉奖绝不足以清空。"""
-        if kind == LAST_KILL:
-            self._pending_end = True
-            return False
-        if kind != FIRST_BLOOD:
-            return False
-        tt = float(t or 0.0)
-        boundary = bool(self._pending_end) or (
-            self._last_fb is not None and tt + self.margin < self._last_fb)
-        if boundary:
-            self._boundary(tr("新的一局先拔头筹"))
-        self._last_fb = tt
-        self._in_battle = True
-        return boundary
+    def mission_status(self, status: str) -> bool:
+        if status in FINISHED_MISSION_STATUSES:
+            self._mission_finished = True
+            return self._finish(tr("任务已结算"))
+        if status == "running" and self._mission_finished:
+            self._mission_finished = False
+            if self._map_valid is not False:
+                self.hud_closed = False
+        return False
 
     def scene_changed(self, scene: str | None) -> bool:
         """只记录几何签名（换图后主窗口要重新 fit），**永远不当作对局边界**。
@@ -134,17 +139,22 @@ class BattleWatcher:
         """
         now = bool(ok)
         t = self.clock()
+        previous = self._map_valid
+        self._map_valid = now
         if not now:
+            if previous is None and self._max_t is None and not self.hud_closed:
+                # 终端在机库启动时，8111 也可能返回客户端留存的战报。
+                self._left_battle = True
+                self._close_hud()
             if self._invalid_since is None:
                 self._invalid_since = t
                 return False
             if not self._left_battle and t - self._invalid_since >= self.valid_grace:
                 self._left_battle = True
-                self._boundary(tr("离开战场（回大厅）已 {0:.0f}s", t - self._invalid_since))
-                return True
+                return self._finish(tr("离开战场（回大厅）已 {0:.0f}s", t - self._invalid_since))
             return False
-        if self._invalid_since is not None and not self._left_battle:
-            pass                                # 抖动后恢复: 什么都不做
+        if self._left_battle or previous is False:
+            self.hud_closed = False
         self._invalid_since = None
         self._left_battle = False
         return False
@@ -166,6 +176,10 @@ class BattleWatcher:
         if first or gap is None:
             return False        # 首次上线 / 本来就在线: 重复的"在线"信号永不清空
         if gap >= self.offline_grace:
-            self._boundary(tr("断连 {0:.0f}s 后重连", gap))
+            self._map_valid = None
+            self._invalid_since = None
+            self._left_battle = self._mission_finished = self.hud_closed = False
+            self._max_t = self._closed_at = None
+            self._record_boundary(tr("断连 {0:.0f}s 后重连", gap))
             return True
         return False

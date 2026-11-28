@@ -6,9 +6,19 @@ from PySide6.QtWidgets import (
 )
 
 from ..agent.fitting import ACTIVITY_FILL_RANGE, FOLLOW_ZOOM_RANGE
+from ..agent.live_maps import MAP_MODES
 from ..agent.uiprefs import WINDOW_LAYOUTS
 from ..i18n import LANGUAGES, tr
 from .overlay import ITEM_LABELS
+
+
+def map_mode_combo(window, device):
+    combo = QComboBox()
+    for mode, label in MAP_MODES.items():
+        combo.addItem(tr(label), mode)
+    combo.setCurrentIndex(combo.findData(getattr(window.ui_prefs, f"{device}_map_mode")))
+    combo.currentIndexChanged.connect(lambda _: window.set_live_map_mode(device, combo.currentData()))
+    return combo
 
 
 class SidebarSettings(QScrollArea):
@@ -83,6 +93,8 @@ class SidebarSettings(QScrollArea):
             group = self._group(layout, tr("战局信息"))
             self._check(group, "show_ticket_eta", tr("显示预计结束时间"),
                         lambda: win.ui_prefs.show_ticket_eta, win.set_ticket_eta_visible)
+            self.map_mode = map_mode_combo(win, "desktop")
+            self._field(group, tr("战局地图"), self.map_mode)
 
             group = self._group(layout, tr("视角"))
             self._check(group, "activity_fit", tr("自动放大地图"),
@@ -185,9 +197,11 @@ class SidebarSettings(QScrollArea):
             blocker = QSignalBlocker(check)
             check.setChecked(bool(self.bindings[key]()))
             if key == "activity_fit":
-                available = self.win.map_view.activity_fit_available()
+                view = self.win.map_view
+                available = view.activity_fit_available()
                 check.setEnabled(available)
-                check.setToolTip("" if available else tr("驾驶飞机时停用"))
+                check.setToolTip("" if available else
+                                 tr("显示空战地图时停用" if view.air_map_active else "驾驶飞机时停用"))
             del blocker
 
     def _vehicle(self, key, on):

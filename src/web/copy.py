@@ -47,7 +47,7 @@ _TEXT = {
     "killedMe": ("本局击毁过你 {0} 次", "Times they killed you this battle: {0}"),
     "killCount": ("击杀 {0}", "Kills: {0}"),
     "enemy": ("敌方", "Enemies"),
-    "friend": ("友方", "Allies"),
+    "friend": ("我方", "Your team"),
     "unknown": ("未定阵营", "Unknown side"),
     "hiddenCount": ("已隐藏 {0} 人（离场）", "Hidden (left): {0}"),
     "noMatch": ("没有匹配的昵称或载具", "No matching nicknames or vehicles"),

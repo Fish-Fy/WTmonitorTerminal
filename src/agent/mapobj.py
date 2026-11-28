@@ -19,6 +19,7 @@ import math
 from dataclasses import dataclass
 
 
+TEAM_COLORS = {"friend": "#174dff", "enemy": "#fa0c00"}
 SQUAD_COLORS = frozenset(("#39d921", "#67d756"))
 
 

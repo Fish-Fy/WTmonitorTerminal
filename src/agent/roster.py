@@ -38,11 +38,13 @@ _DAMAGE_VERBS: tuple[str, ...] = ("重创", "致命攻击", "引燃了", "击伤
 # 单人句(只有主语)的状态短语: 短语 -> kind
 _STATE_PHRASES: tuple[tuple[str, str], ...] = (
     ("已掉线", "left"), ("已坠毁", "crashed"),
+    ("已退出战斗", "quit"), ("退出了战斗", "quit"), ("已离开战斗", "quit"), ("离开了战斗", "quit"),
     ("先拔头筹", "first_blood"),                       # 本局第一次击杀 => 开局标志
     ("最后一击", "last_kill"), ("最终赢家", "last_kill"), ("完成了一击", "last_kill"),
     ("获得嘉奖", "award"), ("杀！", "award"),
 )
-_END_MARKERS = ("最后一击", "最终赢家", "完成了一击")   # 常嵌在「获得嘉奖“最终赢家！”」里
+_END_AWARDS = frozenset(("最后一击", "最终赢家", "完成了一击", "最佳小队",
+                         "final blow", "last blow", "best squad"))
 
 _VERB_RE = "|".join(re.escape(v) for v in (*_KILL_VERBS, *_DAMAGE_VERBS))
 # 取最左边的动词(同一位置上击杀类优先, 因为 alternation 里击杀动词排在前面)
@@ -59,7 +61,8 @@ _EN_PASSIVE = re.compile(
     + r") by(?= )", re.IGNORECASE,
 )
 _EN_SINGLE = re.compile(
-    r"^(?P<subject>.+?) (?:(?P<left>has disconnected from the game|has quit the battle)"
+    r"^(?P<subject>.+?) (?:(?P<left>has disconnected from the game)"
+    r"|(?P<quit>has quit the battle|has left the battle)"
     r"|(?P<crashed>has crashed)|(?P<first_blood>has delivered the first strike)"
     r"|(?P<last_kill>has delivered the final blow)"
     r"""|(?P<award>has achieved ["“][^"”]+["”]))[.!]?$""",
@@ -84,6 +87,7 @@ _WORD_RE = re.compile(r"[0-9A-Za-z一-鿿]")
 # 状态键 -> 中文标签(面板与导出共用)
 # killed 显示为「重生中」(用户要求): 被击毁的人不消失, 等重生; 明确离场(已掉线)才隐藏
 STATUS_LABELS: dict[str, str] = {"alive": "存活", "killed": "重生中", "left": "离场", "unknown": "状态未知"}
+TEAM_LABELS = {"enemy": "敌方", "friend": "我方"}
 STATUS_ORDER: tuple[str, ...] = ("alive", "killed", "left", "unknown")
 
 
@@ -217,11 +221,15 @@ def _parse_award(text: str) -> tuple[str, int]:
     if not match:
         return "", 0
     title = match["title"].strip()
-    name = title.rstrip("!.！。").rstrip().casefold()
+    name = _award_key(title)
     numbered = _NUMBERED_KILL_AWARD.fullmatch(name)
     if numbered:
         return title, int(numbered[1] or numbered[2])
     return title, _FIXED_KILL_AWARDS.get(name, 0)
+
+
+def _award_key(title: str) -> str:
+    return title.rstrip("!.！。").rstrip().casefold()
 
 
 def _parse_english_line(text: str) -> CombatEvent | None:
@@ -244,7 +252,8 @@ def _parse_english_line(text: str) -> CombatEvent | None:
     if match:
         subject, vehicle = _split_operand(match["subject"])
         award, streak = _parse_award(match["award"] or "")
-        return CombatEvent(match.lastgroup, subject=subject, subject_vehicle=vehicle,
+        kind = "last_kill" if _award_key(award) in _END_AWARDS else match.lastgroup
+        return CombatEvent(kind, subject=subject, subject_vehicle=vehicle,
                            verb=match[match.lastgroup], raw=text, award_name=award, award_streak=streak)
     return None
 
@@ -272,9 +281,9 @@ def parse_line(text: str) -> CombatEvent | None:
     if s:
         subject, subject_vehicle = _split_operand(cleaned[:s.start()])
         kind = _STATE_KIND[s.group(0)]
-        if kind == "award" and any(m in cleaned for m in _END_MARKERS):
-            kind = "last_kill"          # 「获得嘉奖“最终赢家！”」这类把收尾标志包在里面
         award, streak = _parse_award(cleaned[s.end():]) if kind == "award" else ("", 0)
+        if _award_key(award) in _END_AWARDS:
+            kind = "last_kill"
         return CombatEvent(kind=kind, subject=subject,
                            subject_vehicle=subject_vehicle, verb=s.group(0), raw=cleaned,
                            award_name=award, award_streak=streak)
@@ -403,7 +412,7 @@ class Roster:
             e.vehicles[ev.subject_vehicle] = e.vehicles.get(ev.subject_vehicle, 0) + 1
             e.used_at[ev.subject_vehicle] = (t, s)
         # 先拔头筹/最后一击/嘉奖 = 此刻还活着; 已坠毁=阵亡; 已掉线=离场
-        self._mark(e, {"left": "left", "crashed": "dead"}.get(ev.kind, "alive"), t, s)
+        self._mark(e, {"left": "left", "quit": "left", "crashed": "dead"}.get(ev.kind, "alive"), t, s)
         return True
 
     @staticmethod
@@ -637,7 +646,7 @@ class Roster:
     def _fmt_t(self, t: float) -> str:
         return f"{int(t // 60):02d}:{int(t % 60):02d}" if t else "-"
 
-    def _line_for(self, display: str) -> str:
+    def _line_for(self, display: str, *, own: bool = False) -> str:
         """一行 = 昵称 + 击杀数 + 当前载具 + 状态；各载具明细走 `kills_detail()`(悬停)。"""
         st = self.stats(display)
         # 重生中的人当前载具未知: 死时开的那架已是历史, 不再冒充"当前载具"(导出里括注留档)
@@ -651,7 +660,8 @@ class Roster:
             parts.append(tr('被我击落{0}', st['killed_by_me']))
         if st["killed_me"]:
             parts.append(tr('击落我{0}', st['killed_me']))
-        return f"  {display}  [{' · '.join(parts)}]"
+        name = tr('{0}（本人）', display) if own else display
+        return f"  {name}  [{' · '.join(parts)}]"
 
     def kills_detail(self, name: str) -> list[tuple[str, int]]:
         """本局用过的每个载具及其击杀数（只开过没杀过的显示 0）。"""
@@ -663,15 +673,19 @@ class Roster:
 
     def to_text(self) -> str:
         parts: list[str] = []
-        for title, side in ((tr("我方(me)"), "me"), (tr("友方"), "friend"), (tr("敌方"), "enemy")):
-            grouped = self.roster(side)
+        displayed = set(self.display_names())
+        own = displayed.intersection(self.roster("me"))
+        for side, title in TEAM_LABELS.items():
+            grouped = displayed.intersection(self.roster(side))
+            if side == "friend":
+                grouped.update(own)
             if grouped:
-                parts.append(f"== {title} ({len(grouped)}) ==")
-                parts += [self._line_for(d) for d in sorted(grouped, key=str.lower)]
+                parts.append(f"== {tr(title)} ({len(grouped)}) ==")
+                parts += [self._line_for(name, own=name in own) for name in sorted(grouped, key=str.lower)]
         unknown_groups = self.by_status("unknown")
         if unknown_groups:
             total = sum(len(v) for v in unknown_groups.values())
-            parts.append(tr('== 未定 ({0}) ==', total))
+            parts.append(f"== {tr('未定阵营 ({0})', total)} ==")
             for status in STATUS_ORDER:
                 rows = unknown_groups.get(status)
                 if not rows:

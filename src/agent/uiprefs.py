@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .fitting import ACTIVITY_FILL_RANGE, DEFAULT_ACTIVITY_FILL, DEFAULT_FOLLOW_ZOOM, FOLLOW_ZOOM_RANGE
+from .live_maps import MAP_MODES
 from ..i18n import DEFAULT_LANGUAGE, normalize_language
 
 UI_STATE_FILE = "ui_state.json"
@@ -77,6 +78,8 @@ class UiPrefs:
     nearby_death_popup: bool = True
     show_ticket_eta: bool = True
     window_layout: str = "auto"
+    desktop_map_mode: str = "follow"
+    phone_map_mode: str = "follow"
 
     @classmethod
     def defaults(cls) -> "UiPrefs":
@@ -139,6 +142,8 @@ class UiPrefs:
         out["_flags"] = {
             "language": self.language,
             "window_layout": self.window_layout,
+            "desktop_map_mode": self.desktop_map_mode,
+            "phone_map_mode": self.phone_map_mode,
             "alive_only": bool(self.alive_only),
             "attitude_aircraft_tilt": bool(self.attitude_aircraft_tilt),
             "highlight_killers": bool(self.highlight_killers),
@@ -171,6 +176,10 @@ class UiPrefs:
             layout = flags.get("window_layout")
             if isinstance(layout, str) and layout in WINDOW_LAYOUTS:
                 p.window_layout = layout
+            for key in ("desktop_map_mode", "phone_map_mode"):
+                mode = flags.get(key)
+                if isinstance(mode, str) and mode in MAP_MODES:
+                    setattr(p, key, mode)
             p.alive_only = _bool(flags.get("alive_only"), p.alive_only)
             p.attitude_aircraft_tilt = _bool(flags.get("attitude_aircraft_tilt"), False)
             p.highlight_killers = _bool(flags.get("highlight_killers"), False)

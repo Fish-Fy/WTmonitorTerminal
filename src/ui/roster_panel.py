@@ -21,25 +21,21 @@ from PySide6.QtWidgets import (
 )
 
 from ..i18n import tr
-from ..agent.roster import STATUS_LABELS, STATUS_ORDER, short_name
+from ..agent.mapobj import TEAM_COLORS
+from ..agent.roster import STATUS_LABELS, STATUS_ORDER, TEAM_LABELS, short_name
 from . import theme
 
-_SECTIONS: tuple[tuple[str, str], ...] = (
-    ("enemy", "敌方"),
-    ("friend", "友方"),
-)
 _UNKNOWN = "unknown"
-_SIDE_COLOR = {"enemy": "#c0392b", "friend": "#174dff", "me": "#b8860b", "unknown": "#6e6e73"}
+_SELF_NAME_COLOR = "#b8860b"
 # 不在场上的人整体压暗, 让"还活着的"一眼能扫出来; 重生中比离场亮一档(他还会回来)
 _DIM = {"killed": "#b0a08a", "left": "#7d6f96", "unknown": "#b0b0b5"}
-_STATUS_COLOR = {"alive": theme.OK, "killed": theme.ACCENT, "left": "#a89abb", "unknown": theme.DIM}
 _STATUS_ROLE = Qt.ItemDataRole.UserRole + 1
 _KILLER_COLOR = "#ffbe55"
 _KILLER_BACKGROUND = "#473321"
 
 
 class StatusDelegate(QStyledItemDelegate):
-    """保留横屏合并列，仅给句尾的状态着色。"""
+    """统一绘制状态色，保留 Qt 的选中背景。"""
 
     def paint(self, painter, option, index):
         colored = index.data(_STATUS_ROLE)
@@ -56,12 +52,11 @@ class StatusDelegate(QStyledItemDelegate):
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
         area.adjust(3, 0, -3, 0)
         fm = opt.fontMetrics
-        # 保留状态字样，过长的载具/时间在较窄的横屏名单里省略。
+        # 空间不足时先缩短载具摘要，尽量保留完整状态和时间。
         status_space = fm.horizontalAdvance(status_text)
-        detail_min = fm.horizontalAdvance(detail.split("·", 1)[0] + "…")
-        if area.width() - status_space < detail_min:
-            status_text = label
-            status_space = fm.horizontalAdvance(label)
+        if status_space > area.width():
+            status_text = fm.elidedText(label, Qt.TextElideMode.ElideRight, max(0, area.width()))
+            status_space = fm.horizontalAdvance(status_text)
         detail = fm.elidedText(detail, Qt.TextElideMode.ElideRight, max(0, area.width() - status_space))
         painter.save()
         painter.setClipRect(area)
@@ -91,6 +86,7 @@ class RosterPanel(QWidget):
         self._highlight_killers = False
         self._hidden_left = 0
         self._portrait = False
+        self._split_teams = False
 
         v = self._layout = QVBoxLayout(self)
         v.setContentsMargins(4, 4, 4, 4)
@@ -127,7 +123,7 @@ class RosterPanel(QWidget):
 
         self.tree = QTreeWidget()
         self.tree.setColumnCount(2)
-        self.tree.setHeaderLabels([tr("名字"), tr("击杀 · 载具 · 状态")])
+        self.tree.setHeaderLabels([tr("昵称"), tr("击杀 · 载具 · 状态")])
         self.tree.header().setStretchLastSection(False)   # 默认 True 会把两列平均分掉, 固定宽度失效
         # 名字列: short_name 统一截到 24 个字符(**含战队前缀**) ⇒ 固定 150px 放得下,
         # 想更宽也能拖(Interactive); 余下宽度全给第二列(用户: "多留些空间显示载具名称")。
@@ -147,11 +143,11 @@ class RosterPanel(QWidget):
         teams_row.setSpacing(6)
         self.team_trees = {}
         self.team_labels = {}
-        for side, title, color in (("friend", "我方", theme.OK), ("enemy", "敌方", "#ff994d")):
+        for side in ("friend", "enemy"):
             column = QVBoxLayout()
             column.setSpacing(3)
-            label = QLabel(tr(title))
-            label.setStyleSheet(f"color: {color}; font-weight: bold; padding-left: 4px;")
+            label = QLabel(tr(TEAM_LABELS[side]))
+            label.setStyleSheet(f"color: {TEAM_COLORS[side]}; font-weight: bold; padding-left: 4px;")
             column.addWidget(label)
             team_tree = QTreeWidget()
             team_tree.setHeaderLabels([tr("昵称"), tr("载具"), tr("击杀"), tr("状态")])
@@ -159,6 +155,7 @@ class RosterPanel(QWidget):
             team_tree.setIndentation(4)
             team_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             team_tree.itemClicked.connect(self._on_item_clicked)
+            team_tree.setItemDelegateForColumn(3, StatusDelegate(team_tree))
             header = team_tree.header()
             header.setStretchLastSection(False)
             header.setMinimumSectionSize(24)
@@ -192,8 +189,24 @@ class RosterPanel(QWidget):
     def set_portrait(self, active: bool) -> None:
         if self._portrait != active:
             self._portrait = active
+            self._split_teams = self._can_split_teams()
             self._layout.setSpacing(4 if active else -1)
             self.hint.setVisible(not active)
+            self._refresh()
+
+    def _can_split_teams(self) -> bool:
+        if not self._portrait:
+            return False
+        metrics = self.fontMetrics()
+        status_width = max(metrics.horizontalAdvance(tr(label) + " 00:00") for label in STATUS_LABELS.values())
+        # 每队还需给昵称、载具、击杀和树控件边距留空间。
+        return self.width() >= 2 * (status_width + 126) + 14
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        split = self._can_split_teams()
+        if self._split_teams != split:
+            self._split_teams = split
             self._refresh()
 
     def set_roster(self, roster, my_nick: str = "") -> None:
@@ -296,16 +309,17 @@ class RosterPanel(QWidget):
             status_text += f" {int(t // 60):02d}:{int(t % 60):02d}"
         # 名字列截到 8 个字符(战队前缀不计), 分隔符也去空格 —— 省下的宽度全给载具名
         nick = short_name(display)
-        color = _STATUS_COLOR.get(status, theme.DIM)
+        color = theme.ROSTER_STATUS_COLORS.get(status, theme.DIM)
         if separate:
-            if status == "unknown":
-                status_label = tr("未知")
-            item = QTreeWidgetItem([nick, veh, str(count), status_label])
+            item = QTreeWidgetItem([nick, veh, str(count), status_text])
             item.setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
-            item.setForeground(3, _color(color))
+            status_column = 3
         else:
             item = QTreeWidgetItem([nick, "·".join((tr('击杀 {0}', count), veh, status_text))])
-            item.setData(1, _STATUS_ROLE, (color, status_label, status_text))
+            status_column = 1
+        item.setData(status_column, _STATUS_ROLE, (color, status_label, status_text))
+        if separate:
+            item.setForeground(status_column, _color(color))
         tip = f"{display} · {veh} · {status_text}"
         # 载具明细做成**行内子项**: 点名字即向下展开(用户要求), 不再靠悬停或加宽列表
         detail = r.kills_detail(display) if hasattr(r, "kills_detail") else []
@@ -321,7 +335,7 @@ class RosterPanel(QWidget):
         item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
         item.setExpanded(False)
         dim = _DIM.get(status)
-        name_color = theme.TEXT if separate and side != "me" else _SIDE_COLOR.get(side, theme.DIM)
+        name_color = _SELF_NAME_COLOR if side == "me" else theme.TEXT
         item.setForeground(0, _color(dim or name_color))
         if dim and not separate:
             item.setForeground(1, _color(dim))
@@ -365,20 +379,21 @@ class RosterPanel(QWidget):
         displayed = set(names)
         my_names = set(r.roster("me"))
         total = 0
-        for side, title in _SECTIONS:
+        for side, title in TEAM_LABELS.items():
             candidates = list(r.roster(side))
             if side == "friend":
                 candidates.extend(my_names)
             rows = [d for d in candidates if d in displayed and self._keep(r, d, needle)]
-            if self._portrait:
-                team_title = tr("我方") if side == "friend" else tr(title)
-                self.team_labels[side].setText(f"{team_title} ({len(rows)})")
+            team_title = f"{tr(title)} ({len(rows)})"
+            if self._split_teams:
+                self.team_labels[side].setText(team_title)
             if not rows:
                 continue
             total += len(rows)
             root = None
-            if not self._portrait:
-                root = self._bold_root(f"{tr(title)} ({len(rows)})")
+            if not self._split_teams:
+                root = self._bold_root(team_title)
+                root.setForeground(0, _color(TEAM_COLORS[side]))
                 self.tree.addTopLevelItem(root)
             # 组内按状态靠拢(用户 2026-10-13 "排版改为存活已知的靠在一起, 未知靠在一起, 离场放一起"):
             # alive/killed 都算"状态已知且还在场"(killed 显示为"重生中", 面板里不消失) ⇒ 同一组;
@@ -395,7 +410,7 @@ class RosterPanel(QWidget):
                 return (gi, -k, name.lower())         # 同击杀数再按名字, 顺序才稳定
 
             for d in sorted(rows, key=_rank):
-                item = self._row(r, d, "me" if d in my_names else side, separate=self._portrait)
+                item = self._row(r, d, "me" if d in my_names else side, separate=self._split_teams)
                 if root is None:
                     self.team_trees[side].addTopLevelItem(item)
                 else:
@@ -430,20 +445,20 @@ class RosterPanel(QWidget):
             self._hidden_left = sum(1 for n in names if r.status_of(n) == "left")
         self._filter_empty = bool(needle and total == 0)
         # 隐藏离场时, 把"被藏起来的人"明写在列表末尾 —— 否则下方一片空白, 看着像"显示不全"
-        if not self._portrait and self._hidden_left > 0:
+        if not self._split_teams and self._hidden_left > 0:
             tip = QTreeWidgetItem([tr('— 已隐藏 {0} 人（已离场，取消勾选可见）—', self._hidden_left), ""])
             tip.setFlags(tip.flags() & ~Qt.ItemIsSelectable)
             tip.setForeground(0, _color("#7d6f96"))
             self.tree.addTopLevelItem(tip)
         self.unknown_button.setText(tr('未定阵营 ({0})', unknown_count))
-        self.unknown_button.setVisible(self._portrait and unknown_count > 0)
+        self.unknown_button.setVisible(self._split_teams and unknown_count > 0)
         if not unknown_count:
             self.unknown_button.setChecked(False)
         self._sync_list_visibility()
         self._update_label()
 
     def _sync_list_visibility(self, _checked=False) -> None:
-        teams = self._portrait and not self.unknown_button.isChecked()
+        teams = self._split_teams and not self.unknown_button.isChecked()
         self._teams.setVisible(teams)
         self.tree.setVisible(not teams)
 

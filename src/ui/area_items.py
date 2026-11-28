@@ -42,12 +42,58 @@ class AreaItem(QGraphicsPathItem):
         self.setPath(self._outline.intersected(map_path))
 
     def paint(self, painter, option, widget=None):
+        self.paint_area(painter)
+
+    def boundary_near(self, rect):
+        return (self._outline.controlPointRect().intersects(rect)
+                and self._outline.intersects(rect) and not self._outline.contains(rect))
+
+    def paint_area(self, painter, *, boundary_only=False):
         painter.save()
         painter.setClipRect(self._map_rect, Qt.ClipOperation.IntersectClip)
         pen, brush = area_style(self.area.type, highlighted=self.isSelected())
         painter.setPen(pen)
-        painter.setBrush(brush)
+        painter.setBrush(Qt.BrushStyle.NoBrush if boundary_only else brush)
         painter.drawPath(self._outline)
+        painter.restore()
+
+
+class AreaBoundaryOverlay(QGraphicsItem):
+    """Redraw only the boundary strokes within the player's immediate screen area."""
+
+    def __init__(self):
+        super().__init__()
+        self._rect = QRectF()
+        self._areas = ()
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.hide()
+
+    def show_boundaries(self, rect, areas):
+        areas = tuple(areas)
+        if not areas:
+            self.hide()
+            self._areas = ()
+            return
+        if rect == self._rect and areas == self._areas:
+            return
+        if rect != self._rect:
+            self.prepareGeometryChange()
+            self._rect = rect
+        self._areas = areas
+        self.show()
+        self.update()
+
+    def boundingRect(self):
+        return self._rect
+
+    def shape(self):
+        return QPainterPath()  # 装饰图层不拦截标注的点击、拖动或右键菜单。
+
+    def paint(self, painter, option, widget=None):
+        painter.save()
+        painter.setClipRect(self._rect, Qt.ClipOperation.IntersectClip)
+        for area in self._areas:
+            area.paint_area(painter, boundary_only=True)
         painter.restore()
 
 

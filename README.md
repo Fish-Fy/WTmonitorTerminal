@@ -15,16 +15,18 @@ Windows 桌面战术面板，汇总 War Thunder 本地 `127.0.0.1:8111` 接口�
 
 适用于 Windows x64。直接使用请下载 Release 附件中的 Windows x64 软件 ZIP。当前源码可从仓库主页克隆或下载。
 
+已有便携版可点「检查更新」。v1.1.6 起支持在本机运行库匹配时使用轻量包，并可回退到完整程序更新包。
+
 ## 主要功能
 
 - 实时战术地图、轨迹、出生点和占领区显示。
 - 地图缓存、地图库管理、人工命名和重复底图整理。
 - 地图标点、连线和路线规划，支持离线编辑。
 - 标点方案可绑定同图的多个任务，也可复制分享码。导入时先选地图，再预览点位与路线。
-- 本局载具识别、敌友分组和击杀统计；本人并入「友方」，优先显示带战队前缀的名字。
+- 本局载具识别、敌友分组和击杀统计。本人并入「我方」，优先显示带战队前缀的名字。
 - 可选高亮本局击毁过自己的玩家，持续到本局结束。
 - 飞行仪表与两种姿态仪样式，包括飞机倾斜、地平线保持水平的样式。
-- 手机浏览器只读显示地图和列表，同一局域网内使用，默认关闭。
+- 手机浏览器只读显示地图和名单，同一局域网内使用。电脑和手机可以分别固定陆战图、固定空战图或跟随载具。手机显示默认关闭。
 
 ## 界面语言
 
@@ -34,7 +36,7 @@ Windows 桌面战术面板，汇总 War Thunder 本地 `127.0.0.1:8111` 接口�
 
 程序只读取本地战术接口，不注入、不读取游戏内存、不修改游戏文件。可显示的信息取决于游戏接口实际提供的数据。
 
-下载包使用空白昵称与默认配置，内置 226 张地图的底图、缩略图及可用的公开任务布局。个人标点方案和对局记录均排除在下载包外。首次使用后，个人地图、方案和界面偏好保存在程序目录的 `data` 中，昵称保存在 `config.yaml` 中。
+完整便携包使用空白昵称与默认配置，内置 227 张地图的底图、缩略图及可用的公开任务布局。首次使用后，个人地图、方案和界面偏好保存在程序目录的 `data` 中，昵称保存在 `config.yaml` 中。
 
 手机显示需在程序中手动开启，并使用面板列出的局域网地址。
 
@@ -91,16 +93,18 @@ Download the latest Windows x64 ZIP. [Latest release](https://github.com/Fish-Fy
 
 WTMonitorTerminal supports Windows x64. Use the Windows x64 ZIP attached to the release to run the packaged application. Clone or download the current source from the repository home page.
 
+Existing portable installations can use Check for Updates. Starting with v1.1.6, the updater can reuse matching runtime files for a lightweight update and fall back to the full program update.
+
 ### Main features
 
 - Live tactical map with movement trails, spawn points, and capture zones.
 - Map caching and library management, including manual map naming and duplicate map cleanup.
 - Map markers, links, and route planning, with offline editing.
 - Bind a marker plan to multiple missions on the same map, or copy a share code. When importing, select the map first, then preview the markers and routes.
-- In-match vehicle identification, friendly and enemy grouping, and kill counts. Your own entry appears under **Friendly**, and displayed names with squadron tags take priority.
+- In-match vehicle identification, friendly and enemy grouping, and kill counts. Your own entry appears under **Allies**, using your squadron tag when available.
 - Optional highlighting for players who destroyed you. The highlight lasts until the end of the match.
 - Flight instruments and two attitude indicator styles, including one in which the aircraft tilts while the horizon stays level.
-- A read-only map and roster view in a phone browser on the same local network. This feature is off by default.
+- A read-only map and roster in a phone browser on the same local network. PC and phone can independently stay on the ground map, stay on the air map, or follow the vehicle. Phone display is off by default.
 
 ### Interface language
 
@@ -110,7 +114,7 @@ Starting with v1.1.1, the desktop terminal and phone view support Simplified Chi
 
 The terminal runs externally and reads game data only through the local tactical interface. It does not inject code into the game, read game memory, or modify game files. The information it can display depends on what the game exposes through that interface.
 
-The download ships with a blank nickname and default settings. It includes 226 map images and thumbnails, plus available public mission layouts. Personal marker plans and match records are excluded from the package. After first use, the terminal stores personal maps, plans, and interface preferences in the program folder's `data` directory. It stores your nickname in `config.yaml`.
+The full portable package ships with a blank nickname and default settings. It includes 227 map images and thumbnails, plus available public mission layouts. After first use, the terminal stores personal maps, plans, and interface preferences in the program folder's `data` directory. It stores your nickname in `config.yaml`.
 
 To use the phone view, enable it in the terminal and open the local network address shown in the panel.
 

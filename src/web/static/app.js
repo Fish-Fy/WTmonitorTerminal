@@ -3,7 +3,8 @@
   const $ = id => document.getElementById(id);
   const labels = JSON.parse($("mirror-copy").textContent);
   const label = (key, value) => value === undefined ? labels[key] : labels[key].replace("{0}", () => String(value));
-  const image = $("map"), stage = $("stage");
+  let image = $("map");
+  const stage = $("stage");
   let source, snapshot = {}, newest = 0, loading = false, pending = 0, connected = false, generation = 0;
   let lastMessage = 0, lastFrame = 0, lastScene = null, frameTimer, scale = 1, pan = {x: 0, y: 0};
   let rosterSignature = "", hideLeftOverride = null, highlightOverride = null;
@@ -167,7 +168,9 @@
     const status = row.status || label("unknownStatus"), seconds = Number(row.status_time) || 0;
     const timestamp = seconds ? ` ${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(Math.floor(seconds % 60)).padStart(2, "0")}` : "";
     summary.title = `${row.name} · ${status}${timestamp}${row.killed_me ? ` · ${label("killedMe", row.killed_me)}` : ""}`;
-    summary.append(name, vehicle, text("span", "kills", row.kills || 0), text("span", "status", status));
+    const statusCell = text("span", "status", status);
+    if (timestamp) statusCell.append(" ", text("span", "status-time", timestamp.trim()));
+    summary.append(name, vehicle, text("span", "kills", row.kills || 0), statusCell);
     const history = document.createElement("div"); history.className = "player-history";
     history.append(text("div", "history-line", `${row.name} · ${status}${timestamp}`));
     for (const entry of row.vehicles || []) {
@@ -248,10 +251,16 @@
       if (currentGeneration !== generation) return;
       clearTimeout(frameTimer);
       lastFrame = Date.now();
+      next.onload = next.onerror = null;
       if (requested > newest) {
         newest = requested;
         frameSize = {width: next.naturalWidth, height: next.naturalHeight};
-        image.src = next.src; image.hidden = false; $("empty").hidden = true;
+        next.id = image.id;
+        next.alt = image.alt;
+        next.draggable = false;
+        image.replaceWith(next);
+        image = next;
+        $("empty").hidden = true;
         transform();
       }
       loading = false;

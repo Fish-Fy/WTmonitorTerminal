@@ -163,9 +163,13 @@ class UpdateButton(QPushButton):
     def _offer_download(self):
         release = self.release
         size = release.size / 1024**2
+        if release.light:
+            summary = tr('{0} → {1}\n优先尝试轻量更新（约 {2:.1f} MiB），需要时改用完整程序更新（约 {3:.0f} MiB）。\n更新会保留方案、地图和个人设置。',
+                         self.version, release.tag, release.light.size / 1024**2, size)
+        else:
+            summary = tr('{0} → {1}（约 {2:.0f} MB）\n更新会保留方案、地图和个人设置。', self.version, release.tag, size)
         dialog, buttons = notes_dialog(
-            self.window, tr("发现新版"),
-            tr('{0} → {1}（约 {2:.0f} MB）\n更新会保留方案、地图和个人设置。', self.version, release.tag, size),
+            self.window, tr("发现新版"), summary,
             release.notes or tr(updater.NO_NOTES),
         )
         buttons.addButton(tr("下载更新"), QDialogButtonBox.ButtonRole.AcceptRole)

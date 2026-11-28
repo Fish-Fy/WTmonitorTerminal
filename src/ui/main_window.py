@@ -26,8 +26,9 @@ from ..agent import mapimg
 from ..agent import mapstatics
 from ..agent import task_layout
 from ..agent.mapinfo import MapInfo
+from ..agent.live_maps import LIVE_FRAME_SEC, LiveMaps, MAP_MODES, map_geometry
 from ..agent.roster import CombatEvent, Roster, parse_line, normalize_key
-from ..agent.battle import BattleWatcher
+from ..agent.battle import BattleWatcher, FINISHED_MISSION_STATUSES, SELF_QUIT
 from ..agent.tickets import TicketEstimate
 from ..agent.killcorr import KillCorrelator
 from ..agent.threatwatch import NearbyDeathNotice, NearbyDeathWatch, RampageNotice, RampageWatch
@@ -56,7 +57,6 @@ log = logging.getLogger(__name__)
 # 没有实时地图对象(游戏在部署/阵亡界面时 `/map_obj.json` 返回 0 字节)时,
 # 上一帧最多再"淡显"保留这么多秒, 超过就只留缓存的占领区/出生点 —— 过期敌人图标不能当情报用。
 STALE_HOLD_SEC = 60.0
-LIVE_FRAME_SEC = 2.0                      # 超过多个轮询周期没收到对象，不再标成实时
 
 
 class ElidedLabel(QLabel):
@@ -158,8 +158,12 @@ class MainWindow(FramelessWindow):
         self._library_mode = False
         self._game_scene = None
         self._game_image = None
+        self._game_image_info = None
+        self._live_maps = LiveMaps()
+        self._desktop_live_map = None
         self._display_image_scene = None      # 禁止拿上一张图的底图执行新任务缩放
         self._game_objects = []
+        self._game_objects_map = None
         self._game_objects_scene = None
         self._game_objects_at = -1e9
         self._cache_display_scene = None
@@ -190,7 +194,7 @@ class MainWindow(FramelessWindow):
         self.poller.map_changed.connect(self._on_map)
         self.poller.scene_changed.connect(self._on_scene)
         self.poller.map_info_changed.connect(self._on_map_info)
-        self.poller.map_objects_changed.connect(self._on_map_objects)
+        self.poller.map_objects_frame.connect(self._on_map_objects)
         self.poller.hud_events_changed.connect(self._on_hud_events)
         self.poller.battle_state_changed.connect(self._on_battle_state)
         self.poller.mission_status_changed.connect(self._on_mission_status)
@@ -322,11 +326,18 @@ class MainWindow(FramelessWindow):
         self.workspace_tabs.setElideMode(Qt.TextElideMode.ElideRight)
         self.workspace_tabs.setUsesScrollButtons(False)
         self.workspace_tabs.setDrawBase(False)
+        self._workspace_tab_indices = {}
         for key, title in (("roster", "载具识别"), ("events", "战场事件"),
                            ("schemes", "标点方案"), ("alerts", "威胁告警")):
             i = self.workspace_tabs.addTab(tr(title))
+            self._workspace_tab_indices[key] = i
             self.workspace_tabs.setTabData(i, key)
-            self.workspace_tabs.setTabToolTip(i, tr(title))
+            self.workspace_tabs.setTabToolTip(i, tr(PANEL_LABELS[key]))
+            if key != "alerts":
+                badge = QLabel()
+                badge.setProperty("workspaceCount", True)
+                badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+                self.workspace_tabs.setTabButton(i, QTabBar.ButtonPosition.RightSide, badge)
         self.workspace_tabs.hide()
         right_layout.addWidget(self.workspace_tabs)
         self.sidebar_stack = QStackedWidget()
@@ -401,6 +412,12 @@ class MainWindow(FramelessWindow):
         self.scheme_empty.setWordWrap(True)
         gbl.addWidget(self.scheme_empty)
 
+        self.scheme_visibility_hint = QLabel()
+        self.scheme_visibility_hint.setProperty("muted", True)
+        self.scheme_visibility_hint.setWordWrap(True)
+        self.scheme_visibility_hint.hide()
+        gbl.addWidget(self.scheme_visibility_hint)
+
         self.marker_list_label = QLabel(tr("标点与区域"))
         self.marker_list_label.setProperty("muted", True)
         gbl.addWidget(self.marker_list_label)
@@ -470,7 +487,6 @@ class MainWindow(FramelessWindow):
             else:
                 self.sidebar_layout.insertWidget(0, self.workspace_context)
             self.workspace_context.show()
-            self.context_hint.setVisible(not portrait)
             self.sidebar_layout.setContentsMargins(*((0, 0, 0, 0) if portrait else (6, 0, 0, 0)))
             self.sidebar_layout.setSpacing(4 if portrait else 8)
             for button in (*self.sidebar_buttons.values(), self.sidebar_back):
@@ -651,6 +667,7 @@ class MainWindow(FramelessWindow):
     def _on_alive_only(self, value: bool) -> None:
         self.ui_prefs.set_alive_only(bool(value))
         self._save_ui_prefs()
+        self._update_badges()
 
     def _on_highlight_killers(self, value: bool) -> None:
         self.ui_prefs.highlight_killers = bool(value)
@@ -663,10 +680,8 @@ class MainWindow(FramelessWindow):
         下一局从 100 起是**递增**，只看 time 回落就漏掉了边界（用户实测到的现象）。
         """
         if self.battle.map_info_valid(in_battle):
-            self._awaiting_battle_map = True
-            self._keep_active_plan()
             self._on_new_battle(self.battle.last_reason)
-        if in_battle and self._awaiting_battle_map:
+        if in_battle and not self.battle.hud_closed and self._awaiting_battle_map:
             self._awaiting_battle_map = False
             self._reset_game_task()
         self._ticket_battle_active = in_battle
@@ -715,7 +730,7 @@ class MainWindow(FramelessWindow):
             self._show_sidebar("library" if self._library_mode else "live")
 
     def _end_edit_if_active(self):
-        if self.map_view._walk_mode or self.map_view._connect_from or self.map_view._area_editor:
+        if self.map_view._connect_from or self.map_view._area_editor:
             self.map_view.end_editing()
 
     def _refresh_context(self) -> None:
@@ -740,8 +755,6 @@ class MainWindow(FramelessWindow):
             hint = tr('绘制{0}', tr(AREA_TYPES[mv._area_editor.kind]))
         elif mv._connect_from:
             hint = tr("连线中")
-        elif mv._walk_mode:
-            hint = tr("连续标点")
         elif self._map_locked:
             hint = tr("离线编辑")
         elif mv.settings.follow_player:
@@ -839,9 +852,22 @@ class MainWindow(FramelessWindow):
         self._save_ui_prefs()
         self._refresh_ticket_eta()
 
+    def set_live_map_mode(self, device: str, mode: str) -> None:
+        key = {"desktop": "desktop_map_mode", "phone": "phone_map_mode"}[device]
+        if mode not in MAP_MODES or getattr(self.ui_prefs, key) == mode:
+            return
+        setattr(self.ui_prefs, key, mode)
+        self._save_ui_prefs()
+        if device == "desktop":
+            self._refresh_live_map_choice()
+        if self.phone_mirror.running:
+            self.phone_mirror.capture()
+
     # ---------------- 载具读数只对已确认的飞机显示 ----------------
     def _set_vehicle_kind(self, kind: str) -> None:
         """仅 Player 的 aircraft 类型可开启仪表，与地图分类和战斗模式无关。"""
+        if kind in ("air", "ground"):
+            self._live_maps.vehicle = kind
         if kind == self._veh_kind:
             return
         self._veh_kind = kind
@@ -870,33 +896,110 @@ class MainWindow(FramelessWindow):
         """侧边栏面板设置项；旧 maps 偏好保留兼容，地图库使用独立入口。"""
         return [(k, tr(PANEL_LABELS[k]), self.ui_prefs.visible(k)) for k in self.panels]
 
-    def _feed_line_count(self) -> int:
-        return max(0, self.event_panel.blockCount() - 1)
+    def _set_panel_count(self, key: str, summary: str, count: str, detail: str = "") -> None:
+        box = self.panels[key]
+        box.set_badge(summary)
+        box.header.setToolTip(detail)
+        index = self._workspace_tab_indices[key]
+        self.workspace_tabs.setTabToolTip(index, "\n".join(filter(None, (box.header.text(), detail))))
+        badge = self.workspace_tabs.tabButton(index, QTabBar.ButtonPosition.RightSide)
+        if badge.text() != count:
+            badge.setText(count)
+            badge.adjustSize()
+            self.workspace_tabs.updateGeometry()
 
     def _update_badges(self) -> None:
         """折起来也看得见"刚刚发生了多少事" —— 只挂计数, 不展开面板。"""
-        self.panels["events"].set_badge(tr('{0} 条', self._feed_line_count()))
+        events = self.event_panel.row_count()
+        self._set_panel_count("events", tr('{0} 条', events), str(events))
         names = self.roster.display_names()
         if self.roster_panel.alive_only():          # 以面板实际状态为准(而不是偏好副本)
             # 勾了"隐藏已离场"时, 徽章要把"看到几个/总共几个"一起说清, 免得以为列表坏了
             left = sum(1 for n in names if self.roster.status_of(n) == "left")
-            self.panels["roster"].set_badge(tr('{0}/{1} 人 · 隐藏离场', len(names) - left, len(names)))
+            visible = len(names) - left
+            self._set_panel_count("roster", tr('{0}/{1} 人 · 隐藏离场', visible, len(names)), f"{visible}/{len(names)}")
         else:
-            self.panels["roster"].set_badge(tr('{0} 人', len(names)))
+            self._set_panel_count("roster", tr('{0} 人', len(names)), str(len(names)))
 
     # ---------------- Poller slots ----------------
     def _on_map(self, img, scene):
         scene = mapimg.resolve_scene(self.data_root, scene)
         self._game_image = (img, scene)
-        if scene is not None and (scene != self._game_scene or (not self._map_locked and scene != self._scene)):
+        self._game_image_info = self._map_info
+        self._live_maps.set_image(img, scene, self._game_image_info)
+        if scene is not None and scene != self._game_scene:
             self._on_scene(scene)
         if self._map_locked:
             return                                # 手动选图(离线规划)中: 别让游戏的图顶掉
+        if self._live_maps.current is not None or self.ui_prefs.desktop_map_mode != "follow":
+            self._show_preferred_map()
+            return
+        self._show_game_scene(scene)
+        if not self._map_locked:
+            self.map_view.set_air_map_active(False)
+            self._load_desktop_image(img)
+
+    def _load_desktop_image(self, img):
         self.map_view.set_scene_name(self._scene)
         self.map_view.load_image(img, new_scene=self._display_image_scene != self._scene)
         self._display_image_scene = self._scene
         self._try_activity_fit()              # 对象可能比底图先到，不能只在对象回调里尝试
         self._refresh_context()
+
+    def _show_preferred_map(self):
+        if self._map_locked:
+            return None
+        mode = self.ui_prefs.desktop_map_mode
+        target = self._live_maps.select(mode, self._veh_kind)
+        if target is None:
+            if mode != "follow":
+                if self._desktop_live_map is not None:
+                    self._desktop_live_map.player_trails["desktop"] = self.map_view.player_trail_snapshot()
+                if self._scene is not None:
+                    self._show_game_scene(None)
+                if not self._map_locked:
+                    self._desktop_live_map = None
+                    self.map_view.set_air_map_active(mode == "air")
+                    self.map_view.show_waiting_for_map(tr("等待本局所选地图 · 可在游戏内切图一次"))
+            elif self._desktop_live_map is None:
+                self.map_view.set_air_map_active(False)
+            return None
+        if target is not self._desktop_live_map or self._scene != target.scene:
+            old = self._desktop_live_map
+            geometry_changed = (old is not None and (
+                old.kind != target.kind or map_geometry(old.info) != map_geometry(target.info)))
+            switched = target.scene != self._scene or geometry_changed
+            if switched:
+                if old is not None:
+                    old.player_trails["desktop"] = self.map_view.player_trail_snapshot()
+                self._show_game_scene(target.scene, target.task, force=geometry_changed)
+            if self._map_locked:
+                return None
+            self._desktop_live_map = target
+            self.map_view.set_air_map_active(target.kind == "air")
+            self._load_desktop_image(target.image)
+            if switched:
+                self.map_view.restore_player_trail(target.player_trails.get("desktop"))
+        return target
+
+    def _refresh_live_map_choice(self):
+        if self._map_locked:
+            return
+        target = self._show_preferred_map()
+        fresh = self._clock() - self._game_objects_at <= LIVE_FRAME_SEC
+        if target is not None:
+            if target is self._live_maps.current:
+                frame = self._game_objects if fresh and self._game_objects_map is target else []
+                self._render_game_objects(frame, remember=False)
+            else:
+                self._render_projected_objects(self._live_maps.projected(target, self._clock(), LIVE_FRAME_SEC))
+        elif self.ui_prefs.desktop_map_mode == "follow" and self._game_image:
+            image, scene = self._game_image
+            self._show_game_scene(scene)
+            if not self._map_locked:
+                self.map_view.set_air_map_active(False)
+                self._load_desktop_image(image)
+                self._render_game_objects(self._game_objects if fresh else [])
 
     def _try_activity_fit(self) -> None:
         if self._map_locked or self._scene is None or self._display_image_scene != self._scene:
@@ -922,23 +1025,24 @@ class MainWindow(FramelessWindow):
         if self.roster.set_self_vehicle(getattr(att, "vehicle", None)):
             self._roster_dirty = True
 
-    def _remember_map_kind(self, objs) -> None:
+    def _remember_map_kind(self, objs, scene=None) -> None:
         """依据当前地图的可见跑道更新自动分类，手动分类始终优先。"""
         from ..agent import mapimg
-        if not self._scene:
+        scene = scene or self._scene
+        if not scene:
             return
-        if not mapimg.map_cache_path(self.data_root, self._scene).is_file():
+        if not mapimg.map_cache_path(self.data_root, scene).is_file():
             return  # 底图尚未成功下载时，禁止用类型元数据造空目录。
         kind = mapimg.guess_kind(objs)
         if kind == "unknown":
             return
-        key = (self._scene, kind)
+        key = (scene, kind)
         if getattr(self, "_scene_kind", None) == key:
             return                       # 同一局同一张图只判一次, 不做每帧读盘
-        mapimg.remember_auto_kind(self.data_root, self._scene, kind)
+        mapimg.remember_auto_kind(self.data_root, scene, kind)
         self._scene_kind = key
 
-    def _render_game_objects(self, objs) -> None:
+    def _render_game_objects(self, objs, *, remember=True) -> None:
         """把一帧游戏地图对象画到地图上（含"这一帧没有数据"的三种情形）。
 
         用户 2026-10-23 报「怎么不显示玩家自己了、还有占领区、出生点」的真机根因：
@@ -955,8 +1059,9 @@ class MainWindow(FramelessWindow):
             self._cache_display_scene = None
             self.map_view.set_map_objects(objs)
             self.map_view.resolve_teammate_deaths(self.roster.side_of, self._clock())
-            self._remember_map_kind(objs)
-            self._remember_statics(objs)
+            if remember:
+                self._remember_map_kind(objs)
+                self._remember_statics(objs)
             self._last_live_at = self._clock()
             self._try_activity_fit()
             return
@@ -981,16 +1086,25 @@ class MainWindow(FramelessWindow):
             # 连缓存都没有(新图 + 还没在对局里见过实时帧): 至少在视口里说清楚在等什么
             self.map_view.set_map_objects([], record_tracks=False)
 
+    def _render_projected_objects(self, objects):
+        if objects is not None and not objects:
+            # 一帧有效，但所有对象都在这个底图之外。
+            self.map_view.clear_objects()
+            self._last_live_at = self._clock()
+        else:
+            self._render_game_objects(objects, remember=False)
+
     def _expire_game_objects(self) -> None:
         self._refresh_ticket_eta()
         if self._clock() - self._game_objects_at > LIVE_FRAME_SEC:
             self._set_vehicle_kind("unknown")
-        if not self._map_locked and self._clock() - self._last_live_at > LIVE_FRAME_SEC:
+        if (not self._map_locked and self._clock() - self._last_live_at > LIVE_FRAME_SEC
+                and (self._scene is not None or self.ui_prefs.desktop_map_mode == "follow")):
             self._render_game_objects([])
 
-    def _remember_statics(self, objs) -> None:
+    def _remember_statics(self, objs, scene=None) -> None:
         """把占领区/出生点/我的位置缓存下来（只有变化时才写盘）。"""
-        scene = self._scene or self._game_scene
+        scene = scene or self._scene or self._game_scene
         if not scene:
             return
         items = mapstatics.extract(objs)
@@ -1005,13 +1119,19 @@ class MainWindow(FramelessWindow):
         except OSError:                                # 落盘失败不该影响实时显示
             log.warning("缓存地图静态要素失败: %s", scene, exc_info=True)
 
-    def _on_map_objects(self, objs):
+    def _on_map_objects(self, objs, checked=True):
         objs = list(objs or ())
+        if (objs and self._live_maps.current is None and self._game_image is not None
+                and self._game_image_info == self._map_info and self._game_image[1] == self._game_scene):
+            self._live_maps.set_image(*self._game_image, self._game_image_info)
+        source = self._live_maps.current
+        self._live_maps.observe(objs, checked, self._clock())
         self._game_objects = objs
+        self._game_objects_map = source
         self._game_objects_scene = self._game_scene
         self._game_objects_at = self._clock() if objs else -1e9
         ground_hud = self._map_info is not None and self._map_info.hud_type == 1
-        if (self._ticket_battle_active and self._game_scene is not None
+        if (self._ticket_battle_active and not self.battle.hud_closed and self._game_scene is not None
                 and (ground_hud or any(obj.type == "respawn_base_tank" for obj in objs))
                 and self._tickets.observe(objs, self._game_objects_at)):
             self._ticket_scene = self._game_scene
@@ -1020,14 +1140,32 @@ class MainWindow(FramelessWindow):
             candidate = task_layout.recognize(objs, self._live_task_catalog())
             if candidate is not None and candidate == self._task_candidate:
                 self._game_task = candidate
+                if source is not None:
+                    source.task = candidate
                 self._apply_live_task()
             self._task_candidate = candidate
         self._update_vehicle_kind(objs)           # 必须先判本人载具，再尝试自动放大
-        self._render_game_objects(objs)
+        old_target = self._desktop_live_map
+        target = self._show_preferred_map()
+        display_objects = objs
+        if source is not None:
+            if objs and checked:
+                self._remember_map_kind(objs, source.scene)
+                self._remember_statics(objs, source.scene)
+            if target is not source:
+                display_objects = self._live_maps.projected(target, self._clock(), LIVE_FRAME_SEC)
+            if target is source:
+                self._render_game_objects(objs, remember=False)
+            elif target is not None and (checked or not objs or target is not old_target):
+                self._render_projected_objects(display_objects)
+        elif self.ui_prefs.desktop_map_mode == "follow":
+            self._render_game_objects(objs)
         # 地图上的友/敌单位数: 用来解释"文案识别到的人数"为什么和局内人数不一致
         friend = sum(1 for o in objs if getattr(o, "side", "") == "friend" and o.x is not None)
         enemy = sum(1 for o in objs if getattr(o, "side", "") == "enemy" and o.x is not None)
         self.roster_panel.set_map_counts(friend, enemy)
+        if self.battle.hud_closed:
+            return
         # 击杀↔图标消失关联的帧 feed: 只数"单位"(口径与 map_view 一致:
         # 排除线段/占领区/出生点/我自己), 友军计数是它的主证据
         def _is_unit(o) -> bool:
@@ -1040,13 +1178,16 @@ class MainWindow(FramelessWindow):
             now=self._clock())
         # 威胁告警①: 附近队友连续阵亡(友方单位图标在我警戒半径内消失)
         # frame_alive: 帧里还有别的对象(比如我自己)时, 友方列表空 = 真没了, 不是打嗝
-        me_xy = next(((o.x, o.y) for o in objs if o.is_player and o.x is not None), None)
+        if source is not None and target is not source and not checked and objs:
+            return  # 投影帧未更新，避免用同一批位置重复判定附近队友变化
+        display_objects = display_objects or []
+        me_xy = next(((o.x, o.y) for o in display_objects if o.is_player and o.x is not None), None)
         notice = self._nearby.feed(
-            [(o.x, o.y, o.type) for o in objs if _is_unit(o) and o.side == "friend"],
-            me_xy, now=self._clock(), frame_alive=bool(objs))
+            [(o.x, o.y, o.type) for o in display_objects if _is_unit(o) and o.side == "friend"],
+            me_xy, now=self._clock(), frame_alive=bool(display_objects))
         if notice:
             self._threat_alert(notice)
-        if not self.map_view._area_editor:
+        if not (self.map_view._area_editor or self.map_view._connect_from):
             self.statusBar().showMessage(tr('对象: {0}', len(objs)), 2000)
 
     def _refresh_ticket_eta(self) -> None:
@@ -1058,7 +1199,9 @@ class MainWindow(FramelessWindow):
         self.map_view.set_ticket_eta(seconds)
 
     def _on_mission_status(self, status: str) -> None:
-        if status in ("success", "fail", "failed"):
+        if self.battle.mission_status(status):
+            self._on_new_battle(self.battle.last_reason)
+        if status in FINISHED_MISSION_STATUSES:
             self._ticket_mission_finished = True
             self.map_view.set_ticket_eta(None)
         elif status == "running":
@@ -1069,20 +1212,17 @@ class MainWindow(FramelessWindow):
         # 先吸收进 roster 建边, 再分类: 这样同一批里的击杀也能立刻参与阵营染色
         # 边界常落在**批内**(首包混着上一局的尾巴), 所以只吸收切点之后的事件。
         evs = list(evs or ())
-        cleared = False
-        # K-1: 嘉奖类边界优先 —— 「先拔头筹」=开局、「最后一击/最终赢家/完成了一击」=收尾。
-        # 陆战可以反复复活, 所以"我被击毁"不能当边界用。
-        for e in evs:
-            ev = parse_line(getattr(e, "msg", "") or "")
-            if ev is not None and ev.kind in ("first_blood", "last_kill"):
-                if self.battle.on_award(ev.kind, float(getattr(e, "time", 0.0) or 0.0)):
-                    self._on_new_battle(self.battle.last_reason)
-                    cleared = True
-        cut, new_battle = self.battle.scan(getattr(e, "time", None) for e in evs)
-        if new_battle and not cleared:
+        parsed = [parse_line(e.msg) for e in evs]
+        rows = []
+        for event, line in zip(evs, parsed):
+            signal = line.kind if line else ""
+            if signal == "quit" and self.roster.is_self_name(line.subject):
+                signal = SELF_QUIT
+            rows.append((event.time, signal))
+        cut, changed = self.battle.scan_hud(rows)
+        if changed:
             self._on_new_battle(self.battle.last_reason)
-        if cut:
-            evs = evs[cut:]
+        evs = evs[cut:]
         if not evs:
             return
         if self.roster.absorb_events(evs):
@@ -1097,8 +1237,7 @@ class MainWindow(FramelessWindow):
         track_deaths = self.map_view.settings.teammate_deaths and not self._map_locked
         streaks_enabled = self.ui_prefs.rampage_alerts
         streak_inputs: list[tuple[float, CombatEvent]] = []
-        for e in evs:
-            ev = parse_line(getattr(e, "msg", "") or "")
+        for e, ev in zip(evs, parsed[cut:]):
             if ev is None:
                 continue
             timestamp = float(getattr(e, "time", 0.0) or 0.0)
@@ -1243,13 +1382,15 @@ class MainWindow(FramelessWindow):
         self.map_view.set_online(self._online)
         if self.battle.connection(online):
             # 重连=客户端可能重启, time/id 空间都会重来 => 按边界处理(需持续离线超过去抖窗口)
+            self._awaiting_battle_map = True
             self._on_new_battle(self.battle.last_reason)
         if not self._online:
+            self._live_maps.observe([], False, self._clock())
             self._ticket_battle_active = False
             self.map_view.set_ticket_eta(None)
-            self._awaiting_battle_map = True
             self._set_vehicle_kind("unknown")
-            self._render_game_objects([])
+            if self._scene is not None or self.ui_prefs.desktop_map_mode == "follow":
+                self._render_game_objects([])
             self.statusBar().showMessage(
                 tr("未连接到战雷战术接口(localhost:8111)。请在游戏设置中开启 Live 战术接口。"), 0)
 
@@ -1259,31 +1400,34 @@ class MainWindow(FramelessWindow):
             self._game_task = self._task_candidate = None
             self.map_view.set_ticket_eta(None)
         self._game_scene = scene
-        if self._map_locked:
-            return                                # 手动选图(离线规划)中: 不跟随游戏换图
-        if scene == self._scene:
+        # 两张不同几何的图可以属于同一局，场景切换不会清空识别池。
+        self.battle.scene_changed(scene)
+        if self._map_info is None and self.ui_prefs.desktop_map_mode == "follow":
+            self._set_vehicle_kind("unknown")
+            self._show_game_scene(scene, self._game_task)
+
+    def _show_game_scene(self, scene, task=None, *, force=False):
+        if self._map_locked or (scene == self._scene and not force):
             return
         if self._keep_active_plan():
             return
-        self._set_vehicle_kind("unknown")
         self._scene = scene
         self._display_image_scene = None
         self._cache_display_scene = None
         self.map_view.set_scene_name(scene)
         # 换图: 清空轨迹与事件标记(视为全新对局/重连)
         self.map_view.on_reconnect()
+        self._nearby.reset()
         # 换图后清除旧活动区，等新地图对象到达后按当前模式定位。
         self.map_view.reset_fit_lock()
         self._fit_pending = True
         # 换图后若是**部署/阵亡界面**(/map_obj 返回 0 字节), 也要先把这张图缓存的
         # 占领区与出生点画出来, 否则刚启动时整张图只有一个底图(用户 2026-10-23 报的现象)
-        self._render_game_objects([])
+        if scene is not None:
+            self._render_game_objects([])
         # 加载该场景方案库
-        self._schemes = markers_store.load_schemes(self.data_root, scene)
-        self._set_task_scope(self._game_task)
-        # 注意: 换图/换视角**不再清空识别池**。真机取证: 陆战出击载具在坦克↔飞机之间切换会换
-        # 两张不同几何的图, 那是同一局 —— 以前把它当边界就是"名单莫名其妙被清空"的真凶。
-        self.battle.scene_changed(scene)
+        self._schemes = markers_store.load_schemes(self.data_root, scene) if scene else []
+        self._set_task_scope(task)
 
     # ---------------- 地图库: 离线选图 / 规划 (用户 2026-10-12) ----------------
     @mapimg.synchronized
@@ -1357,6 +1501,7 @@ class MainWindow(FramelessWindow):
         self._game_scene = mapping.get(self._game_scene, self._game_scene)
         self._game_objects_scene = mapping.get(self._game_objects_scene, self._game_objects_scene)
         self._display_image_scene = mapping.get(self._display_image_scene, self._display_image_scene)
+        self._live_maps.rebind(mapping)
         if self._game_image is not None:
             image, scene = self._game_image
             self._game_image = (image, mapping.get(scene, scene))
@@ -1396,6 +1541,7 @@ class MainWindow(FramelessWindow):
 
         self._map_locked = True
         self._scene = scene
+        self.map_view.set_air_map_active(False)
         self.map_view.set_scene_name(scene)
         self.map_view.on_reconnect()               # 清掉上一张图的轨迹/事件标记
         self.map_view.reset_fit_lock()
@@ -1441,6 +1587,12 @@ class MainWindow(FramelessWindow):
         self._end_edit_if_active()
         self._map_locked = False
         self._set_planning_view(False)
+        self._desktop_live_map = None
+        if self._live_maps.current is not None or self.ui_prefs.desktop_map_mode != "follow":
+            if self._live_maps.select(self.ui_prefs.desktop_map_mode, self._veh_kind) is not None:
+                self._scene = None  # 即使仍是同图，也重新载入战局方案和任务
+            self._refresh_live_map_choice()
+            return
         if self._game_scene is not None:
             self._scene = None  # 同图编辑过后也重新载入游戏方案，结束连续编辑模式
             self._on_scene(self._game_scene)
@@ -1462,6 +1614,7 @@ class MainWindow(FramelessWindow):
         """编辑地图库时用完整侧栏，顶部导航一直保留。"""
         self._library_mode = bool(on)
         self._refresh_ticket_eta()
+        self.map_view.refresh_annotation_proximity()
         if on:
             self.map_view.clear_fire_control_guides()
         self._apply_overlay_items()
@@ -1487,6 +1640,10 @@ class MainWindow(FramelessWindow):
         return True
 
     def _on_new_battle(self, reason: str = "") -> None:
+        """统一重置本局状态，并记录清空原因。"""
+        if self.battle.hud_closed:
+            self._awaiting_battle_map = True
+            self._keep_active_plan()
         self._set_vehicle_kind("unknown")
         if not self._awaiting_battle_map:
             self._reset_game_task()
@@ -1495,19 +1652,19 @@ class MainWindow(FramelessWindow):
         self.map_view.set_ticket_eta(None)
         # 新局恢复临时暂停的自动放大，并保留已选的跟随玩家模式。
         self.map_view.reset_fit_lock()
-        """对局边界统一入口: 识别池、事件面板、id 去重、告警武装全部归零，并**记下原因**。
-
-        原因一定要留痕: 上一轮"名单莫名清空"就是因为触发条件不可查, 只能靠猜。
-        现在每次清空都写进 `clear_log`(内存) + `data/diagnostic/clears.log`(磁盘)。
-        """
         self._fit_pending = True
+        self._live_maps = LiveMaps()
+        self._desktop_live_map = None
         self._game_objects = []
+        self._game_objects_map = None
         self._game_objects_scene = None
         self._game_objects_at = -1e9
         self._last_live_at = -1e9
         self._cache_display_scene = None
         if not self._map_locked:
             self.map_view.on_reconnect()           # 轨迹、死亡环及旧单位不能跨局
+            if self.ui_prefs.desktop_map_mode != "follow":
+                self._show_preferred_map()
         why = reason or self.battle.last_reason or tr("未记录原因")
         line = f"#{self.battle.battle_id} {why}"
         self.clear_log.append(line)
@@ -1517,7 +1674,9 @@ class MainWindow(FramelessWindow):
         self._feed_seen.clear()
         self.alerts.reset()
         self._fresh_roster()
-        self.statusBar().showMessage(tr('新一局开始（第 {0} 局）· {1}', self.battle.battle_id, why), 8000)
+        message = (tr("本局已清空 · {0}", why) if self.battle.hud_closed
+                   else tr('新一局开始（第 {0} 局）· {1}', self.battle.battle_id, why))
+        self.statusBar().showMessage(message, 8000)
         log.info("清空识别池: %s", line)
         try:
             p = self.data_root / "diagnostic" / "clears.log"
@@ -1548,6 +1707,10 @@ class MainWindow(FramelessWindow):
         self._apply_live_task()
 
     def _apply_live_task(self) -> None:
+        if self._live_maps.current is not None:
+            self._live_maps.current.task = self._game_task
+            if self._scene != self._game_scene:
+                return
         if not self._map_locked and self._task != self._game_task and not self._keep_active_plan():
             self._set_task_scope(self._game_task)
 
@@ -1738,13 +1901,15 @@ class MainWindow(FramelessWindow):
         if catalog:
             task_hint += tr("\n点击可手动选择本局任务")
         self.scheme_task.setToolTip(task_hint)
-        box = self.panels["schemes"]
-        if len(visible) < len(self._schemes):
-            box.set_badge(tr('显示 {0}/{1} 套', len(visible), len(self._schemes)))
-            box.header.setToolTip(tr("部分方案绑定到其他任务。切换任务可查看。"))
+        shown, total = len(visible), len(self._schemes)
+        if shown < total:
+            detail = tr("部分方案绑定到其他任务。切换任务可查看。")
+            self._set_panel_count("schemes", tr('显示 {0}/{1} 套', shown, total), f"{shown}/{total}", detail)
         else:
-            box.set_badge(tr('{0} 套', len(visible)))
-            box.header.setToolTip("")
+            detail = ""
+            self._set_panel_count("schemes", tr('{0} 套', shown), str(shown))
+        self.scheme_visibility_hint.setText(detail)
+        self.scheme_visibility_hint.setVisible(bool(detail))
         self._refresh_marker_list()
         self._refresh_context()
 

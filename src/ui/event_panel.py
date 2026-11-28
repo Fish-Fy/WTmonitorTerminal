@@ -53,4 +53,4 @@ class EventPanel(QPlainTextEdit):
         self.setPlainText("")
 
     def row_count(self) -> int:
-        return self.blockCount()
+        return 0 if self.document().isEmpty() else self.blockCount()

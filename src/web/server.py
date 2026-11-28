@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
 
+from ..agent.mapobj import TEAM_COLORS
 from ..ui.theme import css_variables
 from .broadcaster import LiveBus
 from .copy import render_copy
@@ -37,6 +38,7 @@ log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 _THEME_MARK = "<!--THEME-->"
+_TEAM_CSS = ":root { " + " ".join(f"--team-{side}: {color};" for side, color in TEAM_COLORS.items()) + " }"
 _KEEPALIVE = b": keep-alive\n\n"
 
 
@@ -138,7 +140,7 @@ def _make_handler(bus: LiveBus, sound_file: Callable[[], str], stopped: threadin
         def _index(self) -> None:
             html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
             # 色板唯一来源是桌面 theme.py: 页面加载即拿到同一套令牌, 两边不漂移
-            html = html.replace(_THEME_MARK, f"<style>{css_variables()}</style>")
+            html = html.replace(_THEME_MARK, f"<style>{css_variables()}\n{_TEAM_CSS}</style>")
             html = render_copy(html, locale)
             self._reply(200, html.encode("utf-8"), "text/html; charset=utf-8")
 

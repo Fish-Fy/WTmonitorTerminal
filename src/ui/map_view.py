@@ -36,7 +36,7 @@ from ..i18n import tr
 from ..store import scheme_edit
 from ..store.models import Marker, PathLink, Scheme, MARKER_TYPES, MARKER_TYPE_CHOICES, HIDDEN_TYPES
 from ..store.areas import AREA_SHAPES, AREA_TYPES, MAX_AREAS, Area
-from ..agent.mapobj import MapObj
+from ..agent.mapobj import MapObj, TEAM_COLORS
 from ..agent.threatwatch import RADIUS_MAX, RADIUS_MIN   # 判定与绘制共用同一个半径下限
 from ..agent.fitting import (
     ACTIVITY_FILL_RANGE, DEFAULT_ACTIVITY_FILL, DEFAULT_FOLLOW_ZOOM, FOLLOW_ZOOM_RANGE,
@@ -56,7 +56,7 @@ from .air_target_icons import (
 from .fire_control_marker import FireControlMarker, is_fire_control
 from ..agent.fire_control_guidance import course_aligned, runway_approach
 from .area_editor import AreaEditor
-from .area_items import AreaItem
+from .area_items import AreaBoundaryOverlay, AreaItem
 from .scheme_path_item import SchemePathItem, visible_link_pairs
 
 
@@ -73,6 +73,9 @@ AREA_DRAW_MODES = (
 # (真机 2026-10-23: 部署/阵亡/回放界面 `/map_obj.json` 返回 0 字节, 官方 8111 网页同样空白)
 BANNER_STALE = "非实时 · 缓存画面"
 BANNER_EMPTY = "等待实时数据"
+ANNOTATION_OUTLINE_PX = 10.0
+ANNOTATION_FADE_PX = 42.0
+PLAYER_LAYER = 42.0
 TEAMMATE_TRAIL_SECONDS = 45.0
 TEAMMATE_FRAME_GAP_SECONDS = 2.0
 TEAMMATE_DEATH_SECONDS = 9 * 60
@@ -95,6 +98,15 @@ OBJ_TYPES: dict[str, tuple[str, str]] = {
 }
 
 
+def _annotation_opacity(distance: float, inner: float, outer: float) -> float:
+    if distance >= outer:
+        return 1.0
+    if distance <= inner:
+        return 0.0
+    fraction = (distance - inner) / (outer - inner)
+    return round(fraction * fraction * (3 - 2 * fraction), 2)
+
+
 class MarkerItem(QGraphicsPixmapItem):
     """单个标点图元。
 
@@ -107,6 +119,7 @@ class MarkerItem(QGraphicsPixmapItem):
         super().__init__(pm)
         self.marker = marker
         self._view = view
+        self._fill_opacity = 1.0
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setZValue(45.0)
@@ -117,17 +130,30 @@ class MarkerItem(QGraphicsPixmapItem):
             self._view.start_selection_blink()
         return super().itemChange(change, value)
 
+    def set_fill_opacity(self, opacity):
+        if opacity != self._fill_opacity:
+            self._fill_opacity = opacity
+            self.update()
+
     def paint(self, painter, option, widget=None):
-        if self.isSelected():
+        selected = self.isSelected()
+        if not selected and self._fill_opacity == 1.0:
+            super().paint(painter, option, widget)
+            return
+        painter.save()
+        if selected:
             option = QStyleOptionGraphicsItem(option)
             option.state &= ~QStyle.StateFlag.State_Selected
-            painter.save()
             if self._view._selection_dim:
                 painter.setOpacity(painter.opacity() * .28)
+        opacity = painter.opacity()
+        if self._fill_opacity > 0.0:
+            painter.setOpacity(opacity * self._fill_opacity)
             super().paint(painter, option, widget)
-            painter.restore()
-        else:
-            super().paint(painter, option, widget)
+        if self._fill_opacity < 1.0:
+            painter.setOpacity(opacity)
+            painter.drawPixmap(self.offset(), self._view.make_marker_pixmap(self.marker.type, outline=True))
+        painter.restore()
 
     # ---- 拖动后的坐标回写(由 MapView.mouseReleaseEvent 统一触发) ----
     def sync_marker_pos(self) -> bool:
@@ -239,6 +265,9 @@ class MapView(QGraphicsView):
         self._selection_timer.setInterval(450)
         self._selection_timer.timeout.connect(self._blink_selected_markers)
         self._area_items: dict[str, AreaItem] = {}
+        self._area_boundaries = AreaBoundaryOverlay()
+        self._area_boundaries.setZValue(PLAYER_LAYER + 1.0)
+        self._scene.addItem(self._area_boundaries)
         self._area_editor: AreaEditor | None = None
         self._area_press = False
         self._path_items: list[SchemePathItem] = []
@@ -306,6 +335,7 @@ class MapView(QGraphicsView):
         self._public_layout = False
         self._fit_locked = False                # 用户手动调过视角后, 自动 fit 不再抢
         self._aircraft_active = False           # 由已确认的本人载具类型更新
+        self.air_map_active = False             # 当前显示的底图类型独立于本人载具
         self._fit_box: tuple[float, float, float] | None = None   # 已算好的 (中心x,中心y,可视边长)
         self.activity_fill = DEFAULT_ACTIVITY_FILL
         self.activity_edge_pan = True
@@ -319,10 +349,6 @@ class MapView(QGraphicsView):
         # 换图换局、地图缩放全都无关 —— 换图后不再"突然变大变小"。
         self._guard_ratio: float = 0.10    # 面板上那个比例
         self._guard_radius: float = 0.10   # 实际归一化半径 = side × ratio(换图时重算)
-        # 连续画路线：左键依次添加路线点，自动与上一点连线。
-        self._walk_mode = False
-        self._walk_last: str | None = None      # 上一个路线点的 marker id
-        self._walk_press = None                 # 按下位置(用来区分"点一下"与"拖图")
         self._connect_from: str | None = None   # 点选连线的起点 marker id(用户 2026-10-13)
         self._last_marker_type: str | None = None
         self._quick_press = None
@@ -532,12 +558,11 @@ class MapView(QGraphicsView):
 
     def end_editing(self) -> None:
         self.cancel_area_edit()
-        self.stop_walk()
         self.cancel_connect()
         self._hint(tr("已结束编辑"), 3000)
 
     def has_active_plan_edit(self) -> bool:
-        return bool(self._area_editor or self._walk_mode or self._connect_from
+        return bool(self._area_editor or self._connect_from
                     or self._quick_press is not None
                     or isinstance(self._scene.mouseGrabberItem(), MarkerItem))
 
@@ -565,7 +590,17 @@ class MapView(QGraphicsView):
         return not self._fit_locked and self._area_editor is None and self.activity_fit_available()
 
     def activity_fit_available(self) -> bool:
-        return not self._aircraft_active
+        return not (self._aircraft_active or self.air_map_active)
+
+    def set_air_map_active(self, active: bool) -> None:
+        if active == self.air_map_active:
+            return
+        restore_whole = active and self.activity_fit_enabled() and self._fit_box is not None
+        self.air_map_active = active
+        self._fit_box = None
+        if restore_whole:
+            self.fit_whole_map()
+        self.display_settings_changed.emit()
 
     def set_aircraft_active(self, active: bool) -> None:
         """驾驶飞机时停用自动放大并隐藏阵亡标记。"""
@@ -715,14 +750,6 @@ class MapView(QGraphicsView):
                 self.interaction_changed.emit()
             e.accept()
             return
-        if self._walk_mode and e.button() == Qt.MouseButton.LeftButton:
-            # ⚠ 行走模式下**独占左键**: 绝不能把按下传给基类 —— ScrollHandDrag 在按下时就进入
-            # "抓图"状态, 而松手时我又提前 return, press/release 不配对, QGraphicsView 就永久
-            # 卡在拖拽态(用户报的"陷入鼠标左键抓取地图, 很难取消")。
-            self.setFocus(Qt.FocusReason.MouseFocusReason)   # 点一下视图就把焦点拿回来 → Esc 才有效
-            self._walk_press = e.position().toPoint()
-            e.accept()
-            return
         if e.button() == Qt.MouseButton.LeftButton:
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             pos = e.position().toPoint()
@@ -758,11 +785,6 @@ class MapView(QGraphicsView):
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
-        """连续标点时，左键点击放置路线点并与上一点连线。
-
-        无论有没有加点都**不回传基类**, 与 mousePressEvent 严格配对 —— 拖图在这个模式下
-        交给中键或先按 Esc 退出。
-        """
         if e.button() == Qt.MouseButton.MiddleButton:
             self._pan_position = None
             self.viewport().unsetCursor()
@@ -803,12 +825,6 @@ class MapView(QGraphicsView):
         if e.button() == Qt.MouseButton.LeftButton and self._editor_press:
             self._editor_press = False
             e.accept()
-            return
-        if self._walk_mode and e.button() == Qt.MouseButton.LeftButton:
-            pressed, self._walk_press = self._walk_press, None
-            e.accept()
-            if pressed is not None and (e.position().toPoint() - pressed).manhattanLength() <= 4:
-                self.add_walk_point(e.position().toPoint())
             return
         super().mouseReleaseEvent(e)
         # 拖动标点后松手: 把新位置写回方案并重画连线
@@ -851,9 +867,6 @@ class MapView(QGraphicsView):
         if e.key() == Qt.Key.Key_Escape and self._connect_from:
             self.cancel_connect()              # Esc 取消连线
             return
-        if e.key() == Qt.Key.Key_Escape and self._walk_mode:
-            self.stop_walk()                   # Esc 结束连续画路线
-            return
         if (e.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)
                 and e.modifiers() == Qt.KeyboardModifier.NoModifier):
             if not e.isAutoRepeat():
@@ -894,6 +907,7 @@ class MapView(QGraphicsView):
         pm = QPixmap.fromImage(img)
         first = self._base is None
         dimensions_changed = first or (pm.width(), pm.height()) != (self._img_w, self._img_h)
+        trail = self.player_trail_snapshot() if dimensions_changed and not first else None
         if self._base is None:
             self._base = self._scene.addPixmap(pm)
             self._base.setZValue(0.0)
@@ -902,6 +916,8 @@ class MapView(QGraphicsView):
         self._img_w = max(pm.width(), 1)
         self._img_h = max(pm.height(), 1)
         self._scene.setSceneRect(0, 0, self._img_w, self._img_h)
+        if trail is not None:
+            self.restore_player_trail(trail)
         if dimensions_changed and self._teammate_segments:
             self._redraw_teammate_trail()
         if dimensions_changed and self._teammate_deaths:
@@ -929,6 +945,13 @@ class MapView(QGraphicsView):
         """当前正在地图上画的那一帧对象(供主窗口判断"还有没有东西可留")。"""
         return list(self._last_objs)
 
+    def show_waiting_for_map(self, message: str) -> None:
+        self.clear_objects()
+        if self._base is not None:
+            self._scene.removeItem(self._base)
+            self._base = None
+        self._set_banner(message)
+
     def clear_objects(self) -> None:
         """**彻底**清空地图对象(离线选图/换图时用)。
 
@@ -955,6 +978,7 @@ class MapView(QGraphicsView):
         self._obj_items.clear()
         self._player_obj = None
         self._guard_item = None
+        self.refresh_annotation_proximity()
         self._set_banner(None)
 
     def _set_objs_opacity(self, stale: bool) -> None:
@@ -977,6 +1001,7 @@ class MapView(QGraphicsView):
                 it.setOpacity(0.0 if stale and it.data(0) == "teammate_heading" else alpha)
             except RuntimeError:          # C++ 侧已销毁的图元
                 pass
+        self.refresh_annotation_proximity()
         self._set_banner(tr(BANNER_STALE) if stale else None)
 
     def set_map_objects(self, objs: list[MapObj], *, record_tracks: bool = True,
@@ -1126,8 +1151,10 @@ class MapView(QGraphicsView):
             if dist > s.trail_jump_thresh:
                 st.points.clear()
                 self._clear_track_items(st)
-        # 追加并绘制新段
         st.last_seen = (px, py)
+        self._append_player_track(st, px, py)
+
+    def _append_player_track(self, st: TrackState, px: float, py: float) -> None:
         if st.points:
             prev = st.points[-1]
             segment_items = []
@@ -1141,11 +1168,34 @@ class MapView(QGraphicsView):
                 segment_items.append(item)
             st.seg_items.append(tuple(segment_items))
         st.points.append((px, py))
-        if len(st.points) > s.trail_max:
+        if len(st.points) > self.settings.trail_max:
             if st.seg_items:
                 for item in st.seg_items.pop(0):
                     self._scene.removeItem(item)
             st.points.pop(0)
+
+    def player_trail_snapshot(self):
+        track = self._tracks.get("__player__")
+        if track is None:
+            return None
+        return tuple((x / self._img_w, y / self._img_h) for x, y in track.points), track.dead
+
+    def restore_player_trail(self, snapshot) -> None:
+        old = self._tracks.pop("__player__", None)
+        if old is not None:
+            self._clear_track_items(old)
+        if snapshot is None:
+            return
+        points, dead = snapshot
+        track = TrackState()
+        for x, y in points:
+            self._append_player_track(track, x * self._img_w, y * self._img_h)
+        track.dead = dead
+        track.last_seen = track.points[-1] if track.points else None
+        for segment in track.seg_items:
+            for item in segment:
+                item.setVisible(self.settings.player_trail)
+        self._tracks["__player__"] = track
 
     def _clear_track_items(self, st: TrackState):
         for segment in st.seg_items:
@@ -1434,7 +1484,8 @@ class MapView(QGraphicsView):
     def _add_air_target(self, o: MapObj):
         kind = target_kind(o)
         # 明确的轰炸/防守类型决定敌我语义；碉堡保留数据源的阵营颜色。
-        color = {"bombing_point": "#fa0c00", "defending_point": "#174dff"}.get(kind, o.color or "#999999")
+        color = {"bombing_point": TEAM_COLORS["enemy"], "defending_point": TEAM_COLORS["friend"]}.get(
+            kind, o.color or "#999999")
         item = make_target_item(kind, color)
         item.setPos(o.x * self._img_w, o.y * self._img_h)
         item.setZValue(12.0)  # 碉堡周边火炮/防空单位常重合，固定目标保持在普通载具之上。
@@ -1521,7 +1572,7 @@ class MapView(QGraphicsView):
         d = self.px_to_scene(shapes.zone_diameter())
         r = d / 2.0
         items: list = []
-        team_colors = {"enemy": "#fa0c00", "friend": "#174dff", "player": "#174dff"}
+        team_colors = {**TEAM_COLORS, "player": TEAM_COLORS["friend"]}
         owner = o.zone_owner
         fill_hex = team_colors.get(owner, "#ffffff")
         outline = {"friend": "#b9caff", "enemy": "#ffc1bb"}.get(owner, "#101010")
@@ -1595,7 +1646,7 @@ class MapView(QGraphicsView):
         it = QGraphicsPolygonItem(tri)
         it.setBrush(QBrush(QColor("#ffffff")))
         it.setPen(QPen(QColor("#111111"), self.px_to_scene(2.0)))
-        it.setPos(px, py); it.setZValue(42.0)
+        it.setPos(px, py); it.setZValue(PLAYER_LAYER)
         heading = shapes.heading_deg(o.dx, o.dy)
         if heading is None and self._last_player_xy is not None:
             heading = shapes.tangent_deg(self._last_player_xy, (px, py))
@@ -1655,7 +1706,7 @@ class MapView(QGraphicsView):
             m_item.setPos(QPointF(x, y) - m_item.boundingRect().center() * s)
         self._redraw_paths()
 
-    def make_marker_pixmap(self, type_: str) -> QPixmap:
+    def make_marker_pixmap(self, type_: str, *, outline: bool = False) -> QPixmap:
         """地图标点图标(**固定高清源**, 绘制见 marker_icons.py)。
 
         尺寸**不靠重建 pixmap**, 而是"高清源 + 图元 scale":
@@ -1668,7 +1719,35 @@ class MapView(QGraphicsView):
         取整/下限会让屏幕尺寸严重跑偏(实测飙到 54px); scale 是浮点变换, 精确且不用删建图元。
         """
         from .marker_icons import marker_pixmap
-        return marker_pixmap(type_, 64)
+        return marker_pixmap(type_, 64, outline=outline)
+
+    def refresh_annotation_proximity(self) -> None:
+        player = self._player_obj
+        if (player is None or self._objs_stale or self._public_layout
+                or getattr(self.win, "_map_locked", False)):
+            for item in self._marker_items.values():
+                item.set_fill_opacity(1.0)
+            for item in self._path_items:
+                item.set_fill_opacity(1.0)
+            self._area_boundaries.show_boundaries(QRectF(), ())
+            return
+
+        x, y = player.x * self._img_w, player.y * self._img_h
+        pos = QPointF(x, y)
+        inner = self.px_to_scene(ANNOTATION_OUTLINE_PX)
+        outer = self.px_to_scene(ANNOTATION_FADE_PX)
+        for item in self._marker_items.values():
+            dx = x - item.marker.cx * self._img_w
+            dy = y - item.marker.cy * self._img_h
+            item.set_fill_opacity(_annotation_opacity(math.hypot(dx, dy), inner, outer))
+        for item in self._path_items:
+            distance = item.distance_to(pos, max_distance=outer)
+            item.set_fill_opacity(_annotation_opacity(distance, inner, outer))
+
+        radius = self.px_to_scene(shapes.player_len() / 2 + 3.0)
+        rect = QRectF(x - radius, y - radius, 2 * radius, 2 * radius)
+        self._area_boundaries.show_boundaries(rect, (item for item in self._area_items.values()
+                                                     if item.boundary_near(rect)))
 
     def _marker_screen_px(self) -> float:
         """标点当前应有的**屏幕**像素尺寸: 随缩放, 14~24px 封底封顶。"""
@@ -1695,7 +1774,6 @@ class MapView(QGraphicsView):
     # ---- 方案 ----
     def set_scheme(self, scheme: Scheme | None):
         self.cancel_area_edit()
-        self.stop_walk()
         self.cancel_connect()
         self._select_origin = None
         self._band.hide()
@@ -1742,6 +1820,7 @@ class MapView(QGraphicsView):
                 item = AreaItem(area, self._img_w, self._img_h, selectable=True)
                 self._scene.addItem(item)
                 self._area_items[area.id] = item
+        self.refresh_annotation_proximity()
 
     def area_creation_menu(self, parent):
         menu = QMenu(tr("绘制区域"), parent)
@@ -1830,6 +1909,7 @@ class MapView(QGraphicsView):
             self._scene.addItem(line)
             self._path_items.append(line)
             line.setSelected(id(pl) in selected or (reverse is not None and id(reverse) in selected))
+        self.refresh_annotation_proximity()
 
     # ---- 右键交互 ----
     def _ctx(self, pos):
@@ -1867,7 +1947,7 @@ class MapView(QGraphicsView):
 
     def delete_selected_annotations(self):
         scheme = self._scheme
-        if scheme is None or self._area_editor or self._connect_from or self._walk_mode:
+        if scheme is None or self._area_editor or self._connect_from:
             return
         selection = self._scene.selectedItems()
         markers = {item.marker.id for item in selection if isinstance(item, MarkerItem)}
@@ -2028,10 +2108,6 @@ class MapView(QGraphicsView):
             _conn2 = QAction(tr("从这里连线（用列表选…）"), menu)
             _conn2.triggered.connect(lambda: self._start_connect(item))
             menu.addAction(_conn2)
-            # 从该节点继续连续画路线(用户: "从该节点可以连续选择下一个位置的点")
-            _cont = QAction(tr("从此点续画路线"), menu)
-            _cont.triggered.connect(lambda: self.start_walk(from_id=item.marker.id))
-            menu.addAction(_cont)
         else:
             add = menu.addMenu(tr("添加标点"))
             for key, name in MARKER_TYPE_CHOICES:
@@ -2118,7 +2194,7 @@ class MapView(QGraphicsView):
         self._rebuild_markers()
         self.win.persist_schemes()
 
-    # ---- 连续绘制路线点 ----
+    # ---- 快捷标点 ----
     def _hint(self, text: str, timeout: int = 0) -> None:
         win = getattr(self, "win", None)
         if win is not None and hasattr(win, "statusBar"):
@@ -2148,52 +2224,6 @@ class MapView(QGraphicsView):
         self._scene.clearSelection()
         self._marker_items[marker.id].setSelected(True)
         self.win.persist_schemes()
-
-    def start_walk(self, from_id: str | None = None) -> None:
-        """进入连续标点模式，左键依次放置路线点并自动连线。
-
-        from_id 非空时从该节点接着走(用户: "从该节点可以连续选择下一个位置的点")。
-        """
-        if not self._scheme:
-            QMessageBox.information(self, tr("提示"), tr("请先在右侧「标点方案」面板中新建方案。"))
-            return
-        self.cancel_area_edit()
-        self._connect_from = None
-        self._walk_mode = True
-        self._walk_last = from_id or self._walk_last
-        self._walk_press = None
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)   # 点过右侧面板后 Esc 也要能回来
-        self.setFocus()
-        # 双保险: 这个模式下左键专门用来加点, 索性关掉"按住左键抓图" —— 免得拖拽态和加点互抢,
-        # 也就不会出现"陷入抓取地图收不回来"。要拖图请先 Esc 退出(或用中键)。
-        self.setDragMode(QGraphicsView.DragMode.NoDrag)
-        self._hint(tr("连续标点 · Esc 结束"))
-        self.interaction_changed.emit()
-
-    def stop_walk(self) -> None:
-        self._walk_mode = False
-        self._walk_last = None
-        self._walk_press = None                # 别把残留的按下点带出模式
-        self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)   # 恢复左键框选
-        self._hint(tr("已结束连续标点"), 3000)
-        self.interaction_changed.emit()
-
-    def add_walk_point(self, viewport_pos) -> bool:
-        """在点击处添加路线点并与上一点连线，返回是否添加成功。"""
-        if not self._walk_mode or not self._scheme:
-            return False
-        scene_pos = self.mapToScene(viewport_pos)
-        cx = max(0.0, min(1.0, scene_pos.x() / max(self._img_w, 1.0)))
-        cy = max(0.0, min(1.0, scene_pos.y() / max(self._img_h, 1.0)))
-        m = Marker.new("walk", cx, cy)
-        self._last_marker_type = "walk"
-        self._scheme.markers.append(m)
-        if self._walk_last and any(x.id == self._walk_last for x in self._scheme.markers):
-            self._scheme.paths.append(PathLink(from_id=self._walk_last, to_id=m.id, enabled=True))
-        self._walk_last = m.id                # 下一个点从它继续
-        self._rebuild_markers()
-        self.win.persist_schemes()
-        return True
 
     def _edit_clicked_marker(self, item):
         self._scene.clearSelection()
@@ -2228,8 +2258,6 @@ class MapView(QGraphicsView):
 
     def _delete_markeritem(self, it: MarkerItem):
         m = it.marker
-        if self._walk_last == m.id:
-            self.stop_walk()
         if self._connect_from == m.id:
             self.cancel_connect()
         self._scheme.paths = [p for p in self._scheme.paths if p.from_id != m.id and p.to_id != m.id]
@@ -2261,7 +2289,6 @@ class MapView(QGraphicsView):
     def start_connect(self, src: MarkerItem) -> None:
         """进入"点选连线"模式: 接着在地图上点目标标点即可(用户 2026-10-13: 要更直观)。"""
         self.cancel_area_edit()
-        self.stop_walk()
         self._connect_from = src.marker.id
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)      # 让 Esc 能取消
         self.setFocus()

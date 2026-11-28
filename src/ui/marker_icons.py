@@ -27,7 +27,7 @@ FILL = QColor("#ffffff")
 
 
 @lru_cache(maxsize=256)
-def marker_pixmap(type_: str, out_px: int = OUT_PX) -> QPixmap:
+def marker_pixmap(type_: str, out_px: int = OUT_PX, *, outline: bool = False) -> QPixmap:
     """按类型画图标; 不认识的类型回落到「自定义」的圆点。out_px 是**最终像素尺寸**。
 
     带 lru_cache: 地图缩放会反复要同一批 (类型, 尺寸) 组合, 缓存后滚轮缩放几乎零成本。
@@ -39,13 +39,14 @@ def marker_pixmap(type_: str, out_px: int = OUT_PX) -> QPixmap:
     p = QPainter(img)
     try:
         p.setRenderHint(QPainter.Antialiasing)
-        p.setBrush(QBrush(QColor(color_hex)))
+        p.setBrush(Qt.BrushStyle.NoBrush if outline else QBrush(QColor(color_hex)))
         p.setPen(QPen(QColor("#ffffff"), RING))
         d = PX - RING - 4
         p.drawEllipse(QPointF(PX / 2, PX / 2), d / 2, d / 2)
-        p.setBrush(QBrush(FILL))
-        p.setPen(QPen(INK, STROKE, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        _draw_symbol(p, type_, PX / 2, PX / 2, d * 0.30)
+        if not outline:
+            p.setBrush(QBrush(FILL))
+            p.setPen(QPen(INK, STROKE, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            _draw_symbol(p, type_, PX / 2, PX / 2, d * 0.30)
     finally:
         p.end()
     return QPixmap.fromImage(img).scaled(

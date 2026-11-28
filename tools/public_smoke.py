@@ -77,8 +77,8 @@ def run():
                 require(window.nickname_label.toolTip() == "我：[ABC] 示例玩家", "本人战队前缀未同步")
                 tree = window.roster_panel.tree
                 titles = [tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())]
-                require(any(t.startswith("友方") for t in titles) and not any("我方" in t for t in titles),
-                        "本人未合并到友方分组")
+                require(sum(title.startswith("我方") for title in titles) == 1,
+                        "未找到唯一的我方名单分组")
                 require(window.roster.display_names().count("示例玩家") == 0, "本人显示出现重复")
                 report["merged_friend_group"] = True
                 image = QImage(768, 768, QImage.Format.Format_RGB32)

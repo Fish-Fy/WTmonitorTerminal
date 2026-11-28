@@ -33,6 +33,9 @@ class SchemePathItem(QGraphicsPathItem):
         self._link = link
         self._start = start
         self._end = end
+        self._bounds = (min(start.x(), end.x()), min(start.y(), end.y()),
+                        max(start.x(), end.x()), max(start.y(), end.y()))
+        self._fill_opacity = 1.0
         self.reverse_item = None
         if reverse_link is not None:
             self.reverse_item = SchemePathItem(reverse_link, end, start, target_type, source_type)
@@ -50,8 +53,12 @@ class SchemePathItem(QGraphicsPathItem):
             self._style = "standard"
             self.setBrush(QColor("#111111"))
 
-    def distance_to(self, point):
+    def distance_to(self, point, *, max_distance=math.inf):
         """Distance to the continuous link, including the gaps between glyphs."""
+        left, top, right, bottom = self._bounds
+        if (not left - max_distance <= point.x() <= right + max_distance
+                or not top - max_distance <= point.y() <= bottom + max_distance):
+            return math.inf
         if self.path().isEmpty() and (self.reverse_item is None or self.reverse_item.path().isEmpty()):
             return math.inf
         delta = self._end - self._start
@@ -63,6 +70,14 @@ class SchemePathItem(QGraphicsPathItem):
         nearest = self._start + delta * fraction
         return math.hypot(point.x() - nearest.x(), point.y() - nearest.y())
 
+    def set_fill_opacity(self, opacity):
+        if opacity == self._fill_opacity:
+            return
+        self._fill_opacity = opacity
+        self.update()
+        if self.reverse_item is not None:
+            self.reverse_item.set_fill_opacity(opacity)
+
     def itemChange(self, change, value):
         if change == self.GraphicsItemChange.ItemSelectedHasChanged and self.reverse_item is not None:
             self.reverse_item.update()
@@ -70,14 +85,20 @@ class SchemePathItem(QGraphicsPathItem):
 
     def paint(self, painter, option, widget=None):
         pair = getattr(self, "_pair_item", self)
-        if not pair.isSelected():
+        selected = pair.isSelected()
+        if not selected and self._fill_opacity == 1.0:
             super().paint(painter, option, widget)
             return
         pen = self.pen()
-        pen.setColor(QColor("#57e9ff"))
+        if selected:
+            pen.setColor(QColor("#57e9ff"))
+        brush = self.brush()
+        color = brush.color()
+        color.setAlphaF(color.alphaF() * self._fill_opacity)
+        brush.setColor(color)
         painter.save()
         painter.setPen(pen)
-        painter.setBrush(self.brush())
+        painter.setBrush(brush)
         painter.drawPath(self.path())
         painter.restore()
 

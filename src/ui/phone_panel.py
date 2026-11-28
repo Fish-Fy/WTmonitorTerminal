@@ -9,6 +9,7 @@ from PySide6.QtCore import QUrl
 
 from ..i18n import tr
 from ..web.firewall import repair_command
+from .sidebar_settings import map_mode_combo
 
 
 class PhonePanel(QWidget):
@@ -30,6 +31,15 @@ class PhonePanel(QWidget):
         self.enable = QCheckBox(tr("开启手机显示"))
         self.enable.toggled.connect(self._toggle)
         layout.addWidget(self.enable)
+        map_row = QHBoxLayout()
+        map_label = QLabel(tr("战局地图"))
+        self.map_mode = map_mode_combo(window, "phone")
+        map_label.setBuddy(self.map_mode)
+        self.map_mode.setAccessibleName(map_label.text())
+        map_row.addWidget(map_label)
+        map_row.addStretch(1)
+        map_row.addWidget(self.map_mode)
+        layout.addLayout(map_row)
         row = QHBoxLayout()
         row.addWidget(QLabel(tr("端口")))
         self.port = QSpinBox()

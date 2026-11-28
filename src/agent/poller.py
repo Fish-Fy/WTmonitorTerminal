@@ -17,6 +17,8 @@ from .client import WTClient, detect_port
 from .mission import extract_scene_name
 from .mapinfo import MapInfo
 from .mapobj import parse_map_objects, MapObj
+from .live_maps import HUD_MAP, map_geometry
+from .battle import DEFAULT_OFFLINE_GRACE
 from .hudmsg import parse_hudmsg, HudEvent
 from .telemetry import parse_indicators
 
@@ -29,6 +31,12 @@ _STOP_TICK = 0.2
 # 若按 20Hz/10Hz/2Hz/1Hz 对死端口扇出请求, stop() 要到 ~10s 后才能退出, 故离线时降级探活。
 _PROBE_PERIOD = 1.0
 _PROBE_TIMEOUT = 0.4
+_STATE_FAILURE_GRACE = 2.0
+_STATE_RETRY_INTERVAL = 0.15
+# 换了几何却收到上一张底图时，先等游戏更新图像。若确实共用底图，恢复对象后仍低频复查。
+_SAME_IMAGE_GRACE_SEC = 3.0
+_SAME_IMAGE_RECHECK_SEC = 5.0
+_MAP_OBJECT_HZ = 8
 
 
 def _pseudo_scene(mi: MapInfo) -> str | None:
@@ -116,6 +124,7 @@ class Poller(QThread):
     map_info_changed = Signal(object)         # MapInfo
     scene_changed = Signal(object)            # scene_name
     map_objects_changed = Signal(list)        # list[MapObj]
+    map_objects_frame = Signal(list, bool)    # 对跨图投影，标记对象前后几何已复核的帧
     hud_events_changed = Signal(list)         # list[HudEvent] (增量)
 
     def __init__(self, cfg: Config, data_root, parent=None):
@@ -135,6 +144,7 @@ class Poller(QThread):
 
     async def _poll_loop(self) -> None:
         from PySide6.QtGui import QImage
+        from .map_identity import image_identity, same_map
         from .mapimg import ensure_base_cache
 
         online = False
@@ -144,22 +154,31 @@ class Poller(QThread):
         dumped_once = False
         # 底图按 map_generation 取; mi_raw 缓存下来给场景判定复用, 不重复请求
         last_gen: int | None = None
-        last_valid: bool | None = None      # map_info.valid 翻转 => 进/出战场(一局结束)的信号
         last_mission_status = ""
         last_sig: str | None = None         # 地图几何签名(空中↔地面是两张图), 变了就强制重取底图
+        last_view = None
+        seen_huds = set()
+        checked_map_raw = None
+        checked_map_at = float("-inf")
+        last_image_data = b""
+        pending_map = None
+        same_image_since = 0.0
+        recheck_image_at: float | None = None
         have_img = False
         map_ready = False                  # 对象必须归属到已确认的底图，换图下载失败时先等
         mi_raw: dict[str, Any] = {}
         # /hudmsg 是双游标增量接口(裸 GET 返回 400)
         last_evt_id = 0
         last_dmg_id = 0
+        state_failure_at = None
+        offline_at = None
 
         async with WTClient(self.cfg.host, self._port) as client:
             period_state = 1.0 / max(self.cfg.poll.state, 1)
             period_map = 1.0 / max(self.cfg.poll.map_img, 1)   # 这里是"核对 map_generation"的节奏
             period_mission = 1.0 / max(self.cfg.poll.mission, 1)
             period_mission_idle = 1.0 / max(self.cfg.poll.mission_idle, 1) if self.cfg.poll.mission_idle > 0 else 60.0
-            period_objs = 1.0 / 5.0   # /map_obj.json 5Hz: 官方前端整体只有 2Hz, 服务端串行, 别贪
+            period_objs = 1.0 / _MAP_OBJECT_HZ
             period_hud = 1.0 / 2.0    # /hudmsg 2Hz(带游标)
             period_ind = 1.0 / max(float(self.cfg.poll.indicators), 0.5)   # /indicators 姿态仪
 
@@ -187,10 +206,12 @@ class Poller(QThread):
                     except Exception:
                         continue
                     online = True
-                    # 新会话的 HUD 游标归零；探活响应也是首帧遥测，直接交给界面。
-                    last_evt_id = last_dmg_id = 0
-                    seen_event_ids.clear()
-                    last_mission_status = ""
+                    # 短时断连续用游标，避免旧 HUD 消息重播后被误判为新局。
+                    if offline_at is None or now - offline_at >= DEFAULT_OFFLINE_GRACE:
+                        last_evt_id = last_dmg_id = 0
+                        seen_event_ids.clear()
+                        last_mission_status = ""
+                    offline_at = state_failure_at = None
                     self.connection_changed.emit(True)
                     if st:
                         self.state_changed.emit(st)
@@ -203,15 +224,26 @@ class Poller(QThread):
                     next_state = now + period_state
                     try:
                         st = await client.fetch_state()
+                        state_failure_at = None
                         if st:
                             self.state_changed.emit(st)
                     except Exception:
+                        failed_at = time.monotonic()
+                        if state_failure_at is None:
+                            state_failure_at = failed_at
+                        if failed_at - state_failure_at < _STATE_FAILURE_GRACE:
+                            next_state = failed_at + _STATE_RETRY_INTERVAL
+                            await asyncio.sleep(_STATE_RETRY_INTERVAL)
+                            continue
                         online = False
+                        offline_at = failed_at
                         have_img = False       # 掉线/重开后底图与 gen 都不能信, 下一轮重新取
                         map_ready = False
                         last_gen = None
+                        seen_huds.clear()
+                        checked_map_raw = None
                         self.connection_changed.emit(False)
-                        self.map_objects_changed.emit([])
+                        self._emit_map_objects([], False)
                         continue                  # 掉线后马上回到短超时探活，不继续扇出请求
 
                 # /indicators 姿态仪数据源(~1.1KB): 解析后发 Attitude, 符号按 config.attitude 翻正
@@ -231,16 +263,18 @@ class Poller(QThread):
                 if self._stop.is_set():
                     break
 
-                # /map_info.json 核对 gen -> 仅在 gen 变化(或缺图)时才下 /map.img?gen=N
+                # /map_info.json 提供底图版本号和几何；两者都能触发换图。
                 if now >= next_map:
                     next_map = now + period_map
                     map_ready = False
                     try:
-                        mi_raw = await client.fetch_map_info()
+                        # 双图模式下，上一帧末尾复核过的几何可作为下一帧的起点。
+                        mi_raw = (checked_map_raw if checked_map_raw is not None
+                                  and now - checked_map_at <= period_objs else await client.fetch_map_info())
+                        checked_map_raw = None
                         mi = MapInfo.from_dict(mi_raw)
                         # 每轮都报 valid: 主窗口要判断"持续 false 多久"才能区分真离开与瞬时抖动
                         self.battle_state_changed.emit(bool(mi.valid))
-                        last_valid = bool(mi.valid)
                         if mi.valid and mi != last_map_info:
                             last_map_info = mi
                             self.map_info_changed.emit(mi)
@@ -248,35 +282,56 @@ class Poller(QThread):
                         gen = int(gen_raw) if isinstance(gen_raw, (int, float)) else None
                         # 几何签名变化 = 空中大图 ↔ 地面小图 换了张图, gen 不变也得重取(修 K-4)
                         sig = _pseudo_scene(mi) if mi.valid else None
-                        sig_changed = sig is not None and last_sig is not None and sig != last_sig
+                        view = (mi.hud_type, map_geometry(mi))
+                        sig_changed = last_sig is not None and (sig != last_sig or view != last_view)
+                        map_key = (sig, gen, view)
+                        if mi.valid and pending_map != map_key:
+                            pending_map = None
+                            recheck_image_at = None
                         if not mi.valid:
                             have_img = False
-                        if mi.valid and map_img_due(last_gen, gen, have_img, sig_changed=sig_changed):
+                            seen_huds.clear()
+                        elif mi.hud_type in HUD_MAP:
+                            seen_huds.add(mi.hud_type)
+                        recheck = mi.valid and recheck_image_at is not None and now >= recheck_image_at
+                        if recheck:
+                            recheck_image_at = now + _SAME_IMAGE_RECHECK_SEC
+                        if mi.valid and (recheck or map_img_due(last_gen, gen, have_img,
+                                                               sig_changed=sig_changed)):
                             data = await client.fetch_map_img_bytes(gen)
                             if data:
                                 img = QImage()
                                 img.loadFromData(data)
                                 if base_img_ok(img):
-                                    have_img = True
-                                    # 用**实际**缓存目录名当场景名: 伪场景名是几何哈希会撞车
-                                    # (两张不同的图算出同一个 map_xxxx), 那种情况下
-                                    # ensure_base_cache 会另存成 <scene>-2 —— 底图与方案都必须
-                                    # 跟着那个真名走, 否则两张图的标点会串在一起。
-                                    actual = sig or last_scene
-                                    if actual:
-                                        actual = ensure_base_cache(
-                                            self.data_root, actual, data).parent.name
+                                    same_base = (sig_changed or pending_map is not None) and (
+                                        data == last_image_data or same_map(image_identity(last_image_data),
+                                                                            image_identity(data)))
+                                    if same_base and pending_map is None:
+                                        pending_map = map_key
+                                        same_image_since = now
+                                    reuse_base = (same_base and (sig_changed or not have_img)
+                                                  and now - same_image_since >= _SAME_IMAGE_GRACE_SEC)
+                                    if not same_base or reuse_base:
+                                        # 同一几何可能有多套底图，底图与方案跟随缓存确认的实际目录名。
+                                        actual = ensure_base_cache(self.data_root, sig, data).parent.name
                                         self.scene_changed.emit(actual)
-                                    self.map_changed.emit(img, actual)
-                                    last_gen = gen
-                                    last_sig = sig  # 只确认成功的几何，下载失败时下一轮必须重试
+                                        self.map_changed.emit(img, actual)
+                                        have_img = True
+                                        last_gen, last_sig, last_image_data = gen, sig, data
+                                        last_view = view
+                                        if reuse_base:
+                                            recheck_image_at = now + _SAME_IMAGE_RECHECK_SEC
+                                        else:
+                                            pending_map = None
+                                            recheck_image_at = None
                                 else:
                                     log.warning("底图尺寸异常(%sx%s), 丢弃且不缓存",
                                                 img.width(), img.height())
                                     # 记下被拒原因: 这类图**每次都会**被拒 ⇒ 永远没有底图, 地图库里
                                     # 只会看到网格画布。用户 2026-10-13 报的"空白地图"就是它。
                                     # 失败只记日志，禁止为了记拒绝原因创建无底图目录。
-                        map_ready = bool(mi.valid and have_img and last_sig == sig and last_gen == gen)
+                        map_ready = bool(mi.valid and have_img and last_sig == sig
+                                         and last_gen == gen and last_view == view)
                     except Exception:
                         log.debug("map_info/map.img 拉取失败", exc_info=True)
 
@@ -287,28 +342,46 @@ class Poller(QThread):
                     next_objs = now + period_objs
                     try:
                         objs = parse_map_objects(await client.fetch_map_objects()) if map_ready else []
-                        self.map_objects_changed.emit(objs)
+                        checked = bool(map_ready and len(seen_huds) < 2)
+                        if objs and not checked:
+                            after_raw = await client.fetch_map_info()
+                            after = MapInfo.from_dict(after_raw)
+                            checked = (after.valid and after.hud_type == mi.hud_type
+                                       and after.map_generation == mi.map_generation
+                                       and _pseudo_scene(after) == sig and map_geometry(after) == view[1])
+                            if checked:
+                                checked_map_raw = after_raw
+                                checked_map_at = now
+                            else:
+                                objs = []
+                                map_ready = False
+                                checked_map_raw = None
+                                next_map = 0
+                        self._emit_map_objects(objs, checked)
                     except Exception:
-                        self.map_objects_changed.emit([])
+                        checked_map_raw = None
+                        self._emit_map_objects([], False)
 
                 # /hudmsg 2Hz: 带 lastEvt/lastDmg 游标向服务端要增量
                 if self._stop.is_set():
                     break
+                new: list[HudEvent] = []
                 if now >= next_hud:
                     next_hud = now + period_hud
                     try:
                         evs = parse_hudmsg(await client.fetch_hudmsg(last_evt=last_evt_id, last_dmg=last_dmg_id))
-                        if evs:
-                            last_evt_id = max([last_evt_id] + [e.id for e in evs if e.stream == "events"])
-                            last_dmg_id = max([last_dmg_id] + [e.id for e in evs if e.stream == "damage"])
-                        new = [e for e in evs if e.id and e.id not in seen_event_ids]
-                        for e in new:
+                        # 两路消息分别拉取，跨路按全局 ID 归并。旧游标以下的尾包即使重发也不送 UI。
+                        for e in sorted(evs, key=lambda event: event.id):
+                            cursor = last_evt_id if e.stream == "events" else last_dmg_id
+                            if not e.id or e.id in seen_event_ids or (e.stream and e.id <= cursor):
+                                continue
+                            new.append(e)
                             seen_event_ids.add(e.id)
+                        last_evt_id = max(last_evt_id, max((e.id for e in evs if e.stream == "events"), default=0))
+                        last_dmg_id = max(last_dmg_id, max((e.id for e in evs if e.stream == "damage"), default=0))
                         # 防止集合无限增长: 仅保留最近 400 条
                         if len(seen_event_ids) > 400:
                             seen_event_ids = set(sorted(seen_event_ids)[-400:])
-                        if new:
-                            self.hud_events_changed.emit(new)
                     except Exception:
                         pass
 
@@ -340,10 +413,17 @@ class Poller(QThread):
                     except Exception:
                         pass
 
+                if new:
+                    self.hud_events_changed.emit(new)
+
                 upcoming = [v for v in (next_state, next_ind, next_objs, next_map, next_hud, next_mission) if v > 0]
                 sleep_for = max(0.0, min(upcoming) - time.monotonic()) if upcoming else 0.05
                 # 分片短睡: 每片醒来自查停止标志, stop() 后最迟约 _STOP_TICK 秒退出循环
                 await asyncio.sleep(min(sleep_for, _STOP_TICK))
+
+    def _emit_map_objects(self, objects, checked):
+        self.map_objects_changed.emit(objects)
+        self.map_objects_frame.emit(objects, checked)
 
     def run(self) -> None:
         loop = asyncio.new_event_loop()
